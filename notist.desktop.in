@@ -1,0 +1,12 @@
+[Desktop Entry]
+Type=Application
+Name=notist
+GenericName=Notizen, Textverarbeitung & LaTeX
+Comment=Notizen, Word-artige Dokumente und LaTeX mit Live-PDF – automatisch gespeichert
+Exec=@EXEC@ %f
+Icon=notist
+Terminal=false
+Categories=Office;WordProcessor;Utility;
+Keywords=notist;notizen;notiz;notes;keep;text;memo;word;docx;odt;dokument;latex;tex;pdf;formel;erinnerung;reminder;
+MimeType=application/vnd.openxmlformats-officedocument.wordprocessingml.document;application/msword;application/vnd.oasis.opendocument.text;text/x-tex;text/markdown;text/plain;application/x-notes-share;
+StartupWMClass=de.invincible.Notist
