@@ -75,6 +75,7 @@ import settings as setw  # noqa: E402
 import reminders as rem  # noqa: E402
 import base64  # noqa: E402
 import share  # noqa: E402
+import exports as xp  # noqa: E402
 import chrome as ch  # noqa: E402
 import swipe  # noqa: E402
 import recent as rc  # noqa: E402
@@ -112,7 +113,8 @@ HOME_ICON = "\U000F02DC"
 TAB_NAMES = {"notes": "notizen", "docs": "words", "latex": "latex"}
 EXPORTS = {"docx": ("Word-Dokument", "*.docx"), "odt": ("LibreOffice-Dokument", "*.odt"), "pdf": ("PDF", "*.pdf"),
            "txt": ("Text", "*.txt"),
-           "md": ("Markdown", "*.md"), "html": ("Webseite", "*.html")}
+           "md": ("Markdown", "*.md"), "html": ("Webseite", "*.html"), "rtf": ("Rich Text", "*.rtf"),
+           "epub": ("E-Book", "*.epub"), "tex": ("LaTeX-Quelltext", "*.tex"), "zip": ("LaTeX-Projekt (ZIP)", "*.zip")}
 STYLES = ("bold", "italic", "underline", "strike")
 BULLET = "•"
 LIST_RE = __import__("re").compile(r"^(\s*)(• |(\d+)\. )")
@@ -238,7 +240,6 @@ popover.switch-pop list.notes > row:selected { background-color: alpha(@color9, 
 .lbl-sub { font-size: 11px; margin-top: 2px; }
 .label-chips flowboxchild, .label-mine flowboxchild { padding: 0; }
 .find-all .find-div { min-width: 1px; min-height: 22px; background-color: alpha(@primary, 0.4); margin: 0 4px 0 2px; }
-.note-find { margin: 2px 0 8px 0; }
 .lchip { background-color: alpha(@color9, 0.16); border: 1px solid alpha(@color9, 0.55); border-radius: 4px; }
 .lchip > label { font-size: 11px; padding: 0 6px 0 8px; color: @foreground; }
 .lchip > button.lchip-x { background: none; background-image: none; box-shadow: none; border: none;
@@ -269,11 +270,17 @@ entry.tsearch, searchentry.tsearch, .pb-window searchentry {
 searchentry.tsearch:focus-within, .pb-window searchentry:focus-within { border-color: @primary; }
 searchentry.tsearch > text > placeholder { color: alpha(@secondary, 0.8); }
 searchentry.tsearch image { color: @primary; }
-menubutton.switcher > button { background-color: alpha(@background, 0.35); border: 1px solid alpha(@primary, 0.55);
-    border-radius: 4px; padding: 1px 8px; min-height: 0; }
-menubutton.switcher > button:hover { border-color: @primary; background-color: alpha(@primary, 0.12); }
-menubutton.switcher > button:checked { border-color: @primary; background-color: alpha(@primary, 0.22); }
-.glass menubutton.switcher > button { background-color: alpha(@background, 0.2); }
+menubutton.switcher > button { background: none; background-image: none; border: none; box-shadow: none;
+    border-radius: 4px; padding: 2px 8px; min-height: 0; min-width: 0; color: @primary; }
+menubutton.switcher > button:hover { background-color: alpha(@primary, 0.12); color: @foreground; }
+menubutton.switcher > button:checked { background-color: alpha(@primary, 0.22); color: @foreground; }
+.glass menubutton.switcher > button { background-color: transparent; }
+.tbar button.doctab { padding: 2px 6px 2px 9px; }
+.tbar button.doctab label { font-weight: bold; }
+.tbar .doctab-sep { color: alpha(@foreground, 0.25); }
+button.doctab-x { background: none; background-image: none; border: none; box-shadow: none; padding: 0 3px; min-height: 0;
+    min-width: 0; color: alpha(@foreground, 0.4); font-size: 11px; border-radius: 4px; }
+button.doctab-x:hover { background-color: @tertiary; color: @background; }
 .switch-title { font-size: 13px; } .switch-sub { font-size: 10px; color: @secondary; }
 .switch-chev { color: @primary; }
 popover.switch-pop > contents { border: 1px solid @primary; border-radius: 6px; padding: 10px;
@@ -292,7 +299,45 @@ button.sheet-btn, button.pb.sheet-btn { min-width: 0; min-height: 0; padding: 1p
 /* Editor-Rahmen und Liste schlanker (1 px wie die Kästen in datist/musicalist) */
 .editor { border-width: 1px; border-radius: 6px; padding: 12px 16px 10px 16px; }
 .editor.trash { border-style: dashed; }
-list.notes > row { border-width: 1px; border-radius: 4px; padding: 5px 9px; margin-bottom: 4px; }
+/* Statusleiste: Knöpfe rücken an „übersetzer“ heran */
+.tstatus .ed-bar { margin: 0; }
+/* Obere Werkzeugleisten (Notizen, Words-Fließend, LaTeX) im filist-Look: flach, Trennlinie darunter, kleine umrandete Knöpfe */
+.note-tools, .writer-tools, .flowbar { background: none; border-radius: 0; padding: 2px 2px 4px 2px; margin: 2px 0 8px 0;
+    border-bottom: 1px dashed alpha(@primary, 0.3); }
+.glass .note-tools { background: none; }
+.note-tools button.wt, .note-tools menubutton.wt > button, .note-tools togglebutton.wt,
+.writer-tools button.wt, .writer-tools menubutton.wt > button, .writer-tools togglebutton.wt,
+.flowbar button.wt, .flowbar menubutton.wt > button, .flowbar togglebutton.wt {
+    border: 1px solid transparent; border-radius: 4px; min-height: 24px; padding: 0 6px; font-size: 13px; }
+.note-tools button.wt:hover, .note-tools menubutton.wt > button:hover, .writer-tools button.wt:hover,
+.writer-tools menubutton.wt > button:hover, .flowbar button.wt:hover, .flowbar menubutton.wt > button:hover {
+    background-color: alpha(@primary, 0.16); border-color: alpha(@primary, 0.35); }
+.note-tools button.wt:checked, .note-tools menubutton.wt > button:checked, .note-tools togglebutton.wt:checked,
+.writer-tools button.wt:checked, .writer-tools menubutton.wt > button:checked, .writer-tools togglebutton.wt:checked,
+.flowbar button.wt:checked, .flowbar menubutton.wt > button:checked, .flowbar togglebutton.wt:checked {
+    background-color: alpha(@primary, 0.24); color: @foreground; border-color: @primary; }
+.note-tools .wgroup, .writer-tools .wgroup { border-right: 1px solid alpha(@primary, 0.3); margin-right: 6px; padding-right: 6px; }
+.note-tools .wgroup.last, .writer-tools .wgroup.last { border-right: none; }
+.note-tools dropdown.wt > button { border-radius: 4px; }
+/* Notizliste wie die Dateiliste in filist: flache Zeilen, Hover/Auswahl als Akzentton, Pfadleiste darüber */
+list.notes > row, list.notes > row:hover, list.notes > row:selected { border: none; border-radius: 4px; box-shadow: none; }
+list.notes > row { background: none; padding: 4px 8px; margin: 0 2px 1px 2px; }
+list.notes > row:hover { background-color: alpha(@primary, 0.08); }
+list.notes > row:selected { background-color: alpha(@primary, 0.24); color: @foreground; }
+list.notes > row:selected:hover { background-color: alpha(@primary, 0.3); }
+list.notes > row:not(:selected), .glass list.notes > row:not(:selected) { background: none; }
+.glass list.notes > row:not(:selected):hover { background-color: alpha(@primary, 0.08); }
+popover.switch-pop list.notes > row { background: none; }
+popover.switch-pop list.notes > row:selected { background-color: alpha(@primary, 0.24); }
+.row-title { font-size: 13px; font-weight: bold; }
+.nt-path { padding: 0 2px 4px 2px; }
+.nt-crumbs { border: 1px solid alpha(@primary, 0.35); border-radius: 4px; padding: 0 4px; min-height: 24px; }
+button.nt-crumb { background: none; border: none; box-shadow: none; padding: 1px 6px; min-height: 0; border-radius: 4px;
+    color: alpha(@foreground, 0.75); font-weight: bold; font-size: 12px; }
+button.nt-crumb:hover { background-color: alpha(@primary, 0.16); color: @foreground; }
+button.nt-crumb.last { color: @primary; }
+.nt-sep { color: alpha(@foreground, 0.3); }
+.nt-count { color: @secondary; font-size: 11px; padding: 0 4px; }
 .notes-body { margin: 4px 14px 10px 14px; }
 paned.notes-body > separator { min-width: 9px; background: none; background-image: none; border: none; box-shadow: none;
     margin: 0 2px; }
@@ -588,6 +633,9 @@ class Notes(Gtk.Application):
     def __init__(self):
         super().__init__(application_id=APP_ID, flags=Gio.ApplicationFlags.HANDLES_OPEN)
         self.prefs = self.load_prefs()
+        if "doc_lang" not in self.prefs:             # bestehende Einstellungen: bisher war alles deutsch
+            loc = (os.environ.get("LC_ALL") or os.environ.get("LANG") or "").lower()
+            self.prefs["doc_lang"] = "en" if (not self.prefs and loc.startswith("en")) else "de"
         self.kind = self.prefs.get("kind", "notes")     # Modus: "notes" oder "docs"
         if self.kind not in KINDS:
             self.kind = "notes"
@@ -645,14 +693,23 @@ class Notes(Gtk.Application):
         try:
             with open(PREFS) as f:
                 return json.load(f)
+        except FileNotFoundError:
+            return {}
         except (OSError, ValueError):
+            try:                                 # kaputte Einstellungen nie stillschweigend überschreiben
+                import shutil
+                shutil.copy2(PREFS, PREFS + ".kaputt-" + time.strftime("%Y%m%d-%H%M%S"))
+            except OSError:
+                pass
             return {}
 
     def save_prefs(self):
         try:
             os.makedirs(os.path.dirname(PREFS), exist_ok=True)
-            with open(PREFS, "w") as f:
+            tmp = PREFS + ".tmp"
+            with open(tmp, "w") as f:
                 json.dump(self.prefs, f, indent=1)
+            os.replace(tmp, PREFS)               # nie halb geschrieben
         except OSError:
             pass
 
@@ -720,14 +777,12 @@ class Notes(Gtk.Application):
             import changelog
 
             def has_update(latest):
-                self.ver_btn.remove_css_class("off")
-                self.ver_btn.add_css_class("news")
-                self.ver_btn.set_label(f"󰚰 v{VERSION} → v{latest}")
-                self.ver_btn.set_tooltip_text(changelog.update_text(latest) + " · klick: changelog")
                 if getattr(self, "_update_told", None) != latest:
                     self._update_told = latest
                     GLib.timeout_add(1200, lambda: (self.notify(changelog.update_text(latest)), False)[-1])
             getattr(changelog, "check_update", lambda *a: None)("notist", VERSION, has_update)
+            if getattr(self, "upd_btn", None):
+                self.upd_btn.recheck()
         except Exception as e:
             print("update-check:", e, file=sys.stderr)
 
@@ -803,7 +858,8 @@ class Notes(Gtk.Application):
         import minical
         import flow
         import translate
-        extra += minical.CSS + flow.CSS
+        import findbar
+        extra += minical.CSS + flow.CSS + findbar.CSS
         self.css.load_from_string(extra + css + APP_CSS + EDITOR_CSS + CSS + COLOR_CSS + wcss + lx.CSS + lx.tx.CSS +
                                   setw.CSS + glass.GLASS_CSS + dialogs.CSS + ch.CSS + swipe.CSS + rc.CSS + TUI_CSS +
                                   translate.CSS)
@@ -812,6 +868,16 @@ class Notes(Gtk.Application):
         if getattr(self, "latex", None):
             GLib.idle_add(lambda: self.latex.refresh_colors() and False)
         GLib.idle_add(self._redraw_all)
+        GLib.timeout_add(120, self._retint_text)
+
+    def _retint_text(self):
+        """Text-Tags tragen feste Farben (Kästchen ☐ in Notizen, Aufzählungszeichen) → nach Farbwechsel neu setzen."""
+        if getattr(self, "text", None) is not None and self.current and not self.docs and not self.tex:
+            try:
+                self.style_checks()
+            except Exception:
+                pass
+        return False
 
     def _on_colors_changed(self, _mon, f, other, _ev):
         if os.path.basename(MATUGEN_CSS) not in {x.get_basename() for x in (f, other) if x is not None}:
@@ -887,6 +953,7 @@ class Notes(Gtk.Application):
                                ("mode-docs", lambda *_: self.set_kind("docs"), ["<Alt>2"]),
                                ("mode-latex", lambda *_: self.set_kind("latex"), ["<Alt>3"]),
                                ("latex-folder", lambda *_: self.open_latex_folder(), []),
+                               ("latex-packages", lambda *_: self.latex.open_packages(), []),
                                ("settings", lambda *_: self.open_settings(), ["<Control>comma"]),
                                ("shortcuts", lambda *_: setw.ShortcutsWindow(self.win).present(), ["F1"]),
                                ("archive", lambda *_: self.toggle_archive(), ["<Control><Shift>a"]),
@@ -903,7 +970,10 @@ class Notes(Gtk.Application):
                                ("doc-import", lambda *_: self.import_dialog(), ["<Control>o"]),
                                ("doc-print", lambda *_: self.print_doc(), []),
                                ("close", lambda *_: self.win.close(), ["<Control>q"]),
-                               ("back-home", lambda *_: self.leave_to_home(), ["<Control>w"]),
+                               ("back-home", lambda *_: self.close_doc_tab() if self.view != "home" else self.leave_to_home(),
+                                ["<Control>w"]),
+                               ("tab-next", lambda *_: self.cycle_doc_tab(1), ["<Control>Page_Down"]),
+                               ("tab-prev", lambda *_: self.cycle_doc_tab(-1), ["<Control>Page_Up"]),
                                ("new-folder-move", lambda *_: self.folder_prompt(self.more_btn, None, move=True), [])):
             act = Gio.SimpleAction.new(name, None)
             act.connect("activate", cb)
@@ -911,6 +981,7 @@ class Notes(Gtk.Application):
             self.set_accels_for_action(f"win.{name}", keys)
         for name, cb in (("opt", lambda a, v: self.toggle_opt(v.get_string())),
                          ("doc-export", lambda a, v: self.export_dialog(v.get_string())),
+                         ("export-as", lambda a, v: self.export_dialog(v.get_string())),
                          ("latex-export", lambda a, v: self.latex_export_dialog(v.get_string())),
                          ("doc-import-path", lambda a, v: self.import_file(v.get_string())),
                          ("move-folder", lambda a, v: self.move_to_folder(self.current, v.get_string()))):
@@ -947,23 +1018,14 @@ class Notes(Gtk.Application):
             self.kind_btns[kind] = b
         self.tab_btns = [self.home_btn] + list(self.kind_btns.values())
         # Dropdown für die kompakte Ansicht: zeigt das offene Dokument, klappt Suche + Liste aus
-        self.switcher = Gtk.MenuButton(valign=Gtk.Align.CENTER, hexpand=True, visible=False,
+        self.switcher = Gtk.MenuButton(valign=Gtk.Align.CENTER, visible=False,
                                        tooltip_text="Alle Notizen/Dokumente (Strg+T)")
         self.switcher.add_css_class("switcher")
-        sw = Gtk.Box(spacing=8)
-        sw_titles = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, hexpand=True)
+        sw_titles = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)       # nur noch Zwischenspeicher für update_switcher
         self.switch_title = Gtk.Label(xalign=0, ellipsize=3)
-        self.switch_title.add_css_class("switch-title")
         self.switch_sub = Gtk.Label(xalign=0, ellipsize=3)
-        self.switch_sub.add_css_class("switch-sub")
-        sw_titles.append(self.switch_title)
-        sw_titles.append(self.switch_sub)
-        self.switch_sub.set_visible(False)       # einzeilig wie die übrigen Knöpfe der Kopfleiste
-        sw.append(sw_titles)
         self.switch_chev = Gtk.Label(label="\U000F0140")
-        self.switch_chev.add_css_class("switch-chev")
-        sw.append(self.switch_chev)
-        self.switcher.set_child(sw)
+        self.switcher.set_child(Gtk.Label(label="\U000F035C"))
         self.switch_pop = Gtk.Popover(has_arrow=False)
         self.switch_pop.add_css_class("switch-pop")
         sheet = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8)
@@ -987,8 +1049,25 @@ class Notes(Gtk.Application):
         self.switch_pop.connect("show", self.on_switch_show)
         self.switch_pop.connect("closed", lambda *_: self.switch_chev.set_label("\U000F0140"))
         self.switcher.set_popover(self.switch_pop)
-        self.lead_spacer = Gtk.Box(hexpand=True, visible=False)    # schiebt die Leiste in die Mitte
-        top.append(self.lead_spacer)
+        self.lead_spacer = Gtk.Box(visible=False)
+        # Offene Einträge als Tabs (wie bei filist); die Leiste scrollt, statt das Fenster aufzuweiten
+        self.open_tabs = {k: [] for k in KINDS}
+        self._tabs_sig = None
+        self.doc_tabs = Gtk.Box(spacing=2, valign=Gtk.Align.CENTER)
+        self.tab_scroll = Gtk.ScrolledWindow(hscrollbar_policy=Gtk.PolicyType.EXTERNAL,
+                                             vscrollbar_policy=Gtk.PolicyType.NEVER, hexpand=True, visible=False,
+                                             propagate_natural_width=False)
+        self.tab_scroll.set_child(self.doc_tabs)
+        sep = Gtk.Label(label="│", margin_start=6, margin_end=6)
+        sep.add_css_class("doctab-sep")
+        self.tab_sep = sep
+        top.append(sep)
+        top.append(self.tab_scroll)
+        self.tab_plus = Gtk.Button(label="+", tooltip_text="Neu (Strg+N)", focus_on_click=False,
+                                   valign=Gtk.Align.CENTER, visible=False)
+        self.tab_plus.add_css_class("ttab")
+        self.tab_plus.connect("clicked", lambda *_: self.new_note())
+        top.append(self.tab_plus)
         top.append(self.switcher)
         titles = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, hexpand=True, valign=Gtk.Align.CENTER, visible=False)
         self.titles = titles
@@ -1013,6 +1092,10 @@ class Notes(Gtk.Application):
         self.toast.append(self.toast_btn)
         top.append(self.toast)
         self.search = Gtk.SearchEntry(placeholder_text="alle durchsuchen (strg+⇧+f)", width_chars=14, valign=Gtk.Align.CENTER)
+        fc = Gtk.EventControllerFocus()
+        fc.connect("leave", lambda *_: GLib.idle_add(lambda: self.update_search_vis() and False))
+        self.search.add_controller(fc)
+        self.search.connect("stop-search", lambda *_: (self.search.set_text(""), self.update_search_vis()))
         self.search.add_css_class("tsearch")
         self.search.connect("search-changed", lambda *_: self.refresh_list())
         top.append(self.search)
@@ -1029,6 +1112,9 @@ class Notes(Gtk.Application):
         self.ver_btn.add_css_class("off")
         self.ver_btn.connect("clicked", lambda *_: self.show_changelog())
         top.append(self.ver_btn)
+        import changelog
+        self.upd_btn = changelog.update_button("notist", VERSION, notify=self.notify)     # 󰚰 update neben der Version
+        top.append(self.upd_btn)
         gear = ch.button("󰒓", "Einstellungen (Strg+,)", action="win.settings")
         gear.set_margin_start(6)
         top.append(gear)
@@ -1061,7 +1147,8 @@ class Notes(Gtk.Application):
         # Zwei Finger nach rechts / Maustaste „zurück“: eine Ebene zurück, am Ende landet man auf Home
         self.nav_back, self.nav_cur, self._nav_id, self._nav_skip = [], None, None, False
         self.swipe = swipe.SwipeBack(self.main_stack, self.can_nav_back, self.nav_go_back,
-                                     where=self.swipe_where, target=self.swipe_target)
+                                     where=self.swipe_where, target=self.swipe_target,
+                                     goto=self.swipe_goto)
         # linker Rand: zuletzt benutzte Einträge des gewählten Bereichs (Klick auf „notist“ heftet sie an)
         self.recent = rc.RecentDrawer(self, self.swipe.widget)
         self.build_jump()
@@ -1078,6 +1165,15 @@ class Notes(Gtk.Application):
                                      column_spacing=4, row_spacing=4, visible=False)
         self.label_box.add_css_class("label-chips")
         left.append(self.label_box)
+        self.pathbar = Gtk.Box(spacing=6)
+        self.pathbar.add_css_class("nt-path")
+        self.crumbs = Gtk.Box(spacing=0, hexpand=True)
+        self.crumbs.add_css_class("nt-crumbs")
+        self.pathbar.append(self.crumbs)
+        self.path_count = Gtk.Label()
+        self.path_count.add_css_class("nt-count")
+        self.pathbar.append(self.path_count)
+        left.append(self.pathbar)
         scroll = Gtk.ScrolledWindow(hscrollbar_policy=Gtk.PolicyType.NEVER, vexpand=True)
         self.list_scroll = scroll
         self.listbox = Gtk.ListBox(selection_mode=Gtk.SelectionMode.SINGLE)
@@ -1147,7 +1243,7 @@ class Notes(Gtk.Application):
         for k, v in (("alt+0-3", "bereich"), ("strg+n", "neu"), ("strg+o", "öffnen"), ("strg+,", "einstellungen")):
             self.hint_box.append(ch.hint(k, v))
         status.append(self.hint_box)
-        self.trx_btn = Gtk.ToggleButton(label="󰗊 übersetzer", focus_on_click=False, valign=Gtk.Align.CENTER,
+        self.trx_btn = Gtk.ToggleButton(label="󰗊 übersetzer", focus_on_click=False, valign=Gtk.Align.END,
                                         tooltip_text="Übersetzer Deutsch ⇄ Englisch (Strg+Umschalt+T)")
         self.trx_btn.add_css_class("pb"); self.trx_btn.add_css_class("small")
         self.trx_btn.set_cursor_from_name("pointer")
@@ -1327,6 +1423,11 @@ class Notes(Gtk.Application):
         self.meta = Gtk.Label(xalign=0, hexpand=True, ellipsize=3)
         self.meta.add_css_class("meta")
         bar.append(self.meta)
+        self.lang_btn = Gtk.Button(focus_on_click=False, valign=Gtk.Align.CENTER)
+        self.lang_btn.add_css_class("pb"); self.lang_btn.add_css_class("small")
+        self.lang_btn.set_cursor_from_name("pointer")
+        self.lang_btn.connect("clicked", lambda *_: self.set_doc_lang("en" if self.doc_lang() == "de" else "de"))
+        bar.append(self.lang_btn)
         self.rem_btn = self.make_reminder_button()
         bar.append(self.rem_btn)
         self.label_btn = self.make_label_button()
@@ -1679,12 +1780,34 @@ class Notes(Gtk.Application):
         self.share_pop.connect("show", lambda *_: self.fill_share_menu())
         return mb
 
+    def export_pinned(self):
+        return self.prefs.get("export_pinned") or list(xp.DEFAULT_PINNED)
+
+    def toggle_export_pin(self, fmt):
+        pins = list(self.export_pinned())
+        if fmt in pins:
+            pins.remove(fmt)
+        else:
+            pins.append(fmt)
+        self.prefs["export_pinned"] = pins
+        self.save_prefs()
+        self.fill_share_menu()
+
     def fill_share_menu(self):
-        """„Teilen“: weitergeben + in einen anderen Bereich umwandeln (das Original bleibt)."""
+        """„Teilen“: weitergeben, als Datei speichern (angeheftete Formate oben) + in einen anderen Bereich umwandeln
+        (das Original bleibt). Rechtsklick auf ein Format heftet es an bzw. löst es."""
         entries = [("Weitergeben", (("󰆏", "Als Text kopieren", "", "win.share-copy"),
                                     ("󰇮", "Per E-Mail senden …", "", "win.share-mail"),
-                                    ("󰈝", "Als Datei speichern …", "", "win.share-file"),
                                     ("󰠮", "Für Freunde mit notist (.notes) …", "", "win.share-bundle")))]
+        pins = [f for f in self.export_pinned() if f in xp.FORMATS and self.kind in xp.FORMATS[f][3]]
+        rest = [f for f in xp.FORMATS if f not in pins and self.kind in xp.FORMATS[f][3]]
+
+        def item(f):
+            icon, name, ext, _k = xp.FORMATS[f]
+            return (icon, name, ("󰐃 " if f in pins else "") + ext, f"win.export-as::{f}")
+        entries.append(("Als Datei speichern · rechtsklick heftet an", tuple(item(f) for f in pins)))
+        if rest:
+            entries.append(("Weitere Formate", tuple(item(f) for f in rest)))
         conv = []
         if self.kind in ("notes", "docs"):
             conv.append(("Σ", "In LaTeX umwandeln", "", "win.to-latex"))
@@ -1694,6 +1817,21 @@ class Notes(Gtk.Application):
             entries.append(("Umwandeln (Original bleibt)", tuple(conv)))
         wr.file_menu(entries, sub=self.display_title(self.current) if self.current else "", title="Teilen",
                      pop=self.share_pop)
+
+        def walk(w):
+            if isinstance(w, Gtk.Button) and (w.get_action_name() or "") == "win.export-as":
+                fmt = w.get_action_target_value().get_string()
+                g = Gtk.GestureClick(button=3)
+                g.connect("pressed", lambda *_a, f=fmt: (self.share_pop.popdown(), self.toggle_export_pin(f)))
+                w.add_controller(g)
+                lp = Gtk.GestureLongPress(touch_only=True)
+                lp.connect("pressed", lambda *_a, f=fmt: (self.share_pop.popdown(), self.toggle_export_pin(f)))
+                w.add_controller(lp)
+            c = w.get_first_child()
+            while c is not None:
+                walk(c)
+                c = c.get_next_sibling()
+        walk(self.share_pop.get_child())
 
     # ================= Teilen =================
     def share_copy(self):
@@ -1750,25 +1888,9 @@ class Notes(Gtk.Application):
             self.notify("Kein Mailprogramm gefunden – Ordner mit der Datei geöffnet")
 
     def share_file(self):
-        if self.docs:
-            self.export_dialog("pdf")
-        elif self.tex:
-            self.latex_export_dialog("pdf" if self.latex.pdf_path() else "tex")
-        elif self.current:
-            self.flush(force=True)
-            n = self.current
-            dlg = Gtk.FileDialog(title="Notiz speichern", initial_name=share.safe_name(self.display_title(n)) + ".md")
-
-            def done(d, res):
-                try:
-                    path = d.save_finish(res).get_path()
-                    with open(path, "w", encoding="utf-8") as f:     # .md mit Formatierung, sonst reiner Text
-                        f.write(share.plain(n, "notes") if path.lower().endswith(".txt") else
-                                md.from_note(n["text"], n.get("rich"), n["title"]))
-                    self.notify("Gespeichert")
-                except (GLib.Error, OSError):
-                    pass
-            dlg.save(self.win, None, done)
+        """Ohne Formatwahl: das erste angeheftete Format dieses Bereichs."""
+        pins = [f for f in self.export_pinned() if f in xp.FORMATS and self.kind in xp.FORMATS[f][3]]
+        self.export_dialog(pins[0] if pins else ("tex" if self.tex else "md"))
 
     def share_bundle(self):
         n = self.current
@@ -2378,6 +2500,47 @@ class Notes(Gtk.Application):
         self._settings_win = setw.SettingsWindow(self, page)
         self._settings_win.present()
 
+    # ================= Sprache je Dokument =================
+    LANG_LABEL = {"de": "DE", "en": "EN"}
+
+    def default_lang(self):
+        lang = self.prefs.get("doc_lang")
+        if lang in self.LANG_LABEL:
+            return lang
+        loc = (os.environ.get("LC_ALL") or os.environ.get("LANG") or "de").lower()
+        return "en" if loc.startswith("en") else "de"
+
+    def doc_lang(self, n=None):
+        n = n or self.current
+        lang = n.get("lang") if n else None
+        return lang if lang in self.LANG_LABEL else self.default_lang()
+
+    def set_doc_lang(self, lang):
+        n = self.current
+        if not n or lang not in self.LANG_LABEL or n.get("lang") == lang:
+            return
+        n["lang"] = lang
+        self.stores[self.kind_of(n)].save(n, touch=False)
+        self.apply_doc_lang()
+        self.notify("Sprache: " + ("Deutsch" if lang == "de" else "Englisch"))
+
+    def apply_doc_lang(self):
+        """Sprache des offenen Dokuments: Rechtschreibung (nur dieses Wörterbuch, sonst die Einstellung),
+        Anführungszeichen („…“ / “…”) und Anzeige im Chip."""
+        import spell
+        lang = self.doc_lang()
+        have = spell.installed_langs()
+        spell.set_langs([lang] if lang in have else self.prefs.get("spell_langs", list(spell.DEFAULT_LANGS)))
+        for buf in (self.text.get_buffer(), self.writer.buf, *self.latex.bufs):
+            buf.lang = lang
+        if self.lang_btn.get_label() != self.LANG_LABEL[lang]:
+            self.lang_btn.set_label(self.LANG_LABEL[lang])
+        self.lang_btn.set_tooltip_text("Sprache dieses Dokuments: " + ("Deutsch" if lang == "de" else "Englisch") +
+                                       " – steuert Rechtschreibung und Anführungszeichen (Klick wechselt)")
+        for sc in (self.spell_notes, self.spell_docs, getattr(self.latex, "spell", None)):
+            if sc:
+                sc.queue(0)
+
     def set_spell_langs(self, langs):
         spell.set_langs(langs)
         self.save_prefs()
@@ -2597,6 +2760,23 @@ class Notes(Gtk.Application):
             return (kind, nid), self._swipe_title(kind, nid)
         return ("home", None), "home"
 
+    def swipe_goto(self, key):
+        """2fz vorwärts zu einer verlassenen Ansicht."""
+        kind, nid = key
+        self.recent.close()
+        if kind == "home":
+            self.go_home()
+        elif nid:
+            n = self.stores[kind].notes.get(nid) if kind in self.stores else None
+            if not n or n.get("trashed"):
+                return False
+            self.home_open(kind, nid)
+        elif kind in self.stores:
+            self.set_kind(kind)
+        else:
+            return False
+        return True
+
     def can_nav_back(self):
         return self.view != "home" or bool(self.home_expanded)
 
@@ -2800,60 +2980,52 @@ class Notes(Gtk.Application):
         return self.entry_menu(widget, kind, nid, x, y)
 
     def entry_menu(self, widget, kind, nid, x, y):
-        """Rechtsklick auf einen Eintrag – gleich in allen Listen (Home, Liste/Dropdown, Zuletzt-Leiste)."""
+        """Rechtsklick auf einen Eintrag – gleich in allen Listen (Home, Liste/Dropdown, Zuletzt-Leiste).
+        Gleiche Optik und Auswahl wie „Mehr“ im geöffneten Eintrag, Anheften/Öffnen/Löschen ganz oben."""
         store = self.stores[kind]
         n = store.notes.get(nid)
         if not n:
             return None
-        entries = []
+        run = lambda fn: (lambda: self.open_then(kind, nid, fn))
         if n.get("trashed"):
-            entries += [("󰦛  wiederherstellen", lambda: self.restore_entry(kind, n)),
-                        None, ("󰩹  endgültig löschen …", lambda: self.purge_entry(kind, n))]
+            entries = [(None, (("󰦛", "Wiederherstellen", "", lambda: self.restore_entry(kind, n)),
+                               ("󰩹", "Endgültig löschen …", "", lambda: self.purge_entry(kind, n))))]
         else:
-            entries.append(("󰏌  öffnen", lambda: self.home_open(kind, nid)))
-            entries.append(("󰐄  lösen" if n.get("pinned") else "󰐃  anheften",
-                            lambda: self.pin_entry(kind, n, not n.get("pinned"))))
-            entries += [None,
-                        ("󰆏  als text kopieren", lambda: self.open_then(kind, nid, self.share_copy)),
-                        ("󰇮  per e-mail senden …", lambda: self.open_then(kind, nid, self.share_mail)),
-                        ("󰈝  als datei speichern …", lambda: self.open_then(kind, nid, self.share_file)),
-                        ("󰠮  für freunde mit notist (.notes) …",
-                         lambda: self.open_then(kind, nid, self.share_bundle))]
+            top = [("󰏌", "Öffnen", "", lambda: self.home_open(kind, nid)),
+                   ("󰐄", "Lösen", "", lambda: self.pin_entry(kind, n, False)) if n.get("pinned") else
+                   ("󰐃", "Anheften", "", lambda: self.pin_entry(kind, n, True))]
+            entries = [(None, tuple(top))]
+            share_items = [("󰆏", "Als Text kopieren", "", run(self.share_copy)),
+                           ("󰇮", "Per E-Mail senden …", "", run(self.share_mail)),
+                           ("󰈝", "Als Datei speichern …", "", run(self.share_file)),
+                           ("󰠮", "Für Freunde mit notist (.notes) …", "", run(self.share_bundle))]
+            entries.append(("Teilen", tuple(share_items)))
+            more = [("󰋚", "Versionsverlauf …", "strg+umschalt+h", run(self.show_history)),
+                    ("󰀼", "Aus dem Archiv holen" if n.get("archived") else "Archivieren", "strg+umschalt+a",
+                     run(self.toggle_archive))]
             f = n.get("file")
             if f and os.path.exists(f):
-                entries += [None, ("󰉋  im dateimanager zeigen", lambda: show_in_files(f)),
-                            ("󰅍  pfad kopieren", lambda: (self.win.get_clipboard().set(f),
-                                                          self.notify("Pfad kopiert")))]
+                more += [("󰉋", "Im Dateimanager zeigen", "", lambda: show_in_files(f)),
+                         ("󰅍", "Pfad kopieren", "", lambda: (self.win.get_clipboard().set(f), self.notify("Pfad kopiert")))]
+            entries.append(("Mehr", tuple(more)))
             cur = n.get("folder") or ""
-            folders = self.folder_names(kind)
-            entries.append(None)
-            for fo in folders:
-                if fo != cur:
-                    entries.append((f"󰉋  nach {fo}", lambda fo=fo: self.move_to_folder(n, fo, kind=kind)))
+            fitems = [("󰉋", fo, "", (lambda fo=fo: self.move_to_folder(n, fo, kind=kind)), True)
+                      for fo in self.folder_names(kind) if fo != cur][:14]
             if cur:
-                entries.append(("󰉖  aus dem ordner nehmen", lambda: self.move_to_folder(n, "", kind=kind)))
-            entries.append(("󰉗  in neuen ordner …", lambda: self.folder_prompt(
+                fitems.append(("󰉖", "Aus dem Ordner nehmen", "", lambda: self.move_to_folder(n, "", kind=kind)))
+            fitems.append(("󰉗", "In neuen Ordner …", "", lambda: self.folder_prompt(
                 widget, None, kind=kind, then=lambda fo: self.move_to_folder(n, fo, kind=kind))))
-            entries += [None, ("󰆴  in den papierkorb", lambda: self.home_delete(kind, nid))]
-        pop = Gtk.Popover(has_arrow=False)
-        pop.add_css_class("home-menu")
-        box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=2)
-        head = Gtk.Label(label=self.display_title(n, kind), xalign=0, ellipsize=3, max_width_chars=30)
-        head.add_css_class("hm-head")
-        box.append(head)
-        for e in entries:
-            if e is None:
-                sep = Gtk.Box()
-                sep.add_css_class("fm-line")
-                box.append(sep)
-                continue
-            text, cb = e
-            b = Gtk.Button(label=text, focus_on_click=False)
-            b.add_css_class("hm-item")
-            b.get_child().set_xalign(0)
-            b.connect("clicked", lambda _b, cb=cb: (pop.popdown(), GLib.idle_add(lambda: (cb(), False)[1])))
-            box.append(b)
-        pop.set_child(box)
+            entries.append(("In Ordner verschieben", tuple(fitems)))
+            entries.append((None, (("󰆴", "In den Papierkorb", "", lambda: self.home_delete(kind, nid)),)))
+        pop = wr.file_menu(entries, sub={"notes": "Notiz", "docs": "Words", "latex": "LaTeX"}.get(kind, ""),
+                           title=self.display_title(n, kind))
+        pop.add_css_class("ctx-menu")
+        box = pop.get_child()
+        pop.set_child(None)
+        sc = Gtk.ScrolledWindow(hscrollbar_policy=Gtk.PolicyType.NEVER, propagate_natural_height=True,
+                                max_content_height=560)
+        sc.set_child(box)
+        pop.set_child(sc)
         popup_at(pop, widget, x, y, self.swipe.widget)
         return pop
 
@@ -3088,17 +3260,30 @@ class Notes(Gtk.Application):
     # ================= Suchen: erst im Eintrag, dann in allen =================
     def find_here(self):
         """Strg+F: im geöffneten Eintrag suchen (Leiste über dem Text, rechts „alle …“). Ohne Eintrag bzw. auf
-        Home geht es wie bisher in die Suche über alle."""
+        Home geht es wie bisher in die Suche über alle. Dreistufig: 1× öffnen · 2× (Fokus im Text) zurück ins
+        Suchfeld mit markiertem Text · 3× (Fokus in der Leiste) schließen."""
         if self.view == "home":
             self.home_search.grab_focus()
-        elif self.docs and self.current:          # Strg+F bei offener Leiste schließt sie wieder
-            self.writer.toggle_find()
-        elif self.tex and self.current:
-            self.latex.hide_find() if self.latex.findrev.get_reveal_child() else self.latex.show_find()
-        elif self.current and self.mode != "trash":
-            self.note_find.hide() if self.note_find.is_open() else self.note_find.show()
-        else:
+            return
+        if not self.current or (not self.docs and not self.tex and self.mode == "trash"):
             self.focus_search()
+            return
+        if self.docs:
+            rev, entry, show, hide = self.writer.findrev, self.writer.find_entry, self.writer.show_find, self.writer.hide_find
+        elif self.tex:
+            rev, entry, show, hide = self.latex.findrev, self.latex.find_entry, self.latex.show_find, self.latex.hide_find
+        else:
+            nf = self.note_find
+            rev, entry, show, hide = nf.rev, nf.entry, nf.show, nf.hide
+        if not rev.get_reveal_child():
+            show()
+            return
+        f = self.win.get_focus()
+        if f is not None and (f is rev or f.is_ancestor(rev)):
+            hide()
+        else:
+            entry.grab_focus()
+            entry.select_region(0, -1)
 
     def selected_text(self):
         """Markierter Text im offenen Editor (für den Übersetzer) – sonst ""."""
@@ -3179,6 +3364,14 @@ class Notes(Gtk.Application):
         store = self.stores.get(kind)
         return len(store.visible(q)) if store else 0
 
+    def update_search_vis(self, force=False):
+        """Seitenleisten-Suche nur sichtbar, solange sie Text hat oder gerade gebraucht wird (Strg+Umschalt+F)."""
+        if getattr(self, "_list_place", None) == "pop":
+            self.search.set_visible(True)
+        else:
+            self.search.set_visible(self.view != "home" and (force or bool(self.search.get_text())
+                                                              or self.search.get_focus_child() is not None))
+
     def focus_search(self):
         """Strg+F: Suche fokussieren – im schmalen Fenster liegt sie im Dropdown oben, das erst aufgehen muss
         (sonst landete der Fokus in einem unsichtbaren Feld und Tippen ging ins Leere)."""
@@ -3186,6 +3379,7 @@ class Notes(Gtk.Application):
             if self.switcher.get_visible():
                 self.switcher.popup()          # on_switch_show setzt den Fokus in die Suche
             return
+        self.update_search_vis(force=True)
         self.search.grab_focus()
 
     def on_switch_show(self, *_):
@@ -3268,28 +3462,138 @@ class Notes(Gtk.Application):
                 self.search.set_hexpand(False)
                 self.list_scroll.set_max_content_height(-1)
                 self.left.set_size_request(215, -1)
-                self.top.insert_child_after(self.search, self.toast)
+                self.left.prepend(self.search)           # keine Suchleiste oben: erscheint hier nur bei Bedarf
                 self.body.set_start_child(self.left)
                 self.body.set_position(int(self.prefs.get("side_width", 330)))
         home = self.view == "home"
         self.switcher.set_visible(want == "pop" and not home)
-        self.lead_spacer.set_visible(want == "pop" and not home)
-        # breit: feste Breite, mittig zwischen Tabs und Knöpfen; schmal: nimmt den Rest der Zeile (schrumpft mit)
-        self.switcher.set_hexpand(bool(self.compact))
-        self.lead_spacer.set_visible(want == "pop" and not home and not self.compact)
-        self.switcher.set_size_request(120 if self.compact else 380, -1)
-        self.spacer.set_visible(not (self.compact and want == "pop" and not home))
-        self.search.set_visible(want == "pop" or not home)
+        self.lead_spacer.set_visible(False)
+        self.spacer.set_visible(home)
+        self.tab_scroll.set_visible(not home)
+        self.tab_sep.set_visible(not home)
+        self.tab_plus.set_visible(not home and not self.compact)
+        self.update_search_vis()
 
     def update_switcher(self):
         n = self.current
         if n:
-            lines = [l for l in n["text"].splitlines() if l.strip()]
             title = self.display_title(n)
         else:
             title = "Papierkorb" if self.mode == "trash" else f"Keine {self.noun(True)}"
         self.switch_title.set_label(title)
         self.switch_sub.set_label(self.subtitle.get_label())
+        self.update_doc_tabs()
+
+    # ================= Tabs offener Einträge =================
+    def update_doc_tabs(self):
+        """Tab-Leiste oben: je Bereich die geöffneten Einträge (Reihenfolge des Öffnens). Der aktuelle kommt
+        automatisch dazu; gelöschte/archivierte verschwinden. Wird nur neu gebaut, wenn sich etwas ändert."""
+        if self.view == "home":
+            return
+        tabs = self.open_tabs[self.kind]
+        n = self.current
+        if n and self.mode == "notes" and n["id"] not in tabs:
+            tabs.append(n["id"])
+        alive = {x["id"] for x in self.store.visible()}
+        tabs[:] = [t for t in tabs if t in alive]
+        cur = n["id"] if n and n["id"] in tabs else None
+        items = [(t, self.display_title(self.store.notes[t])) for t in tabs]
+        sig = (self.kind, cur, tuple(items))
+        if sig == self._tabs_sig:
+            return
+        self._tabs_sig = sig
+        while (c := self.doc_tabs.get_first_child()):
+            self.doc_tabs.remove(c)
+        many = len(items) > 1
+        group = None
+        for i, (nid, title) in enumerate(items):
+            b = self.make_doc_tab(nid, i + 1, title, many)
+            if group is not None:
+                b.set_group(group)
+            group = group or b
+            b.set_active(nid == cur)
+            self.doc_tabs.append(b)
+        if cur:
+            GLib.idle_add(self.reveal_doc_tab, cur)
+
+    def make_doc_tab(self, nid, num, title, closable):
+        b = Gtk.ToggleButton(focus_on_click=False, valign=Gtk.Align.CENTER, tooltip_text=title)
+        b.add_css_class("ttab")
+        b.add_css_class("doctab")
+        b.nid = nid
+        key = Gtk.Label(label=ch.SUP[num] if num < 10 else "")
+        key.add_css_class("key")
+        name = Gtk.Label(label=title, ellipsize=3, max_width_chars=18)
+        x = Gtk.Button(label="✕", focus_on_click=False, tooltip_text="Tab schließen (Strg+W)", visible=closable)
+        x.add_css_class("doctab-x")
+        x.connect("clicked", lambda *_: self.close_doc_tab(nid))
+        b.set_child(ch.hbox(key, name, x, spacing=4))
+        b.x_btn = x
+        b.connect("toggled", lambda btn: btn.get_active() and self.open_doc_tab(nid))
+        mid = Gtk.GestureClick(button=2)
+        mid.connect("pressed", lambda *_: self.close_doc_tab(nid))
+        b.add_controller(mid)
+        # das ✕ steckt im Tab-Knopf, der den Klick sonst selbst schluckt → vorher abfangen
+        xc = Gtk.GestureClick(button=1, propagation_phase=Gtk.PropagationPhase.CAPTURE)
+
+        def pressed(g, n_press, px, py, btn=b):
+            w = btn.pick(px, py, Gtk.PickFlags.DEFAULT)
+            if btn.x_btn.get_visible() and w is not None and (w is btn.x_btn or w.is_ancestor(btn.x_btn)):
+                g.set_state(Gtk.EventSequenceState.CLAIMED)
+                GLib.idle_add(lambda: self.close_doc_tab(nid) and False)
+        xc.connect("pressed", pressed)
+        b.add_controller(xc)
+        return b
+
+    def reveal_doc_tab(self, nid):
+        b = self.doc_tabs.get_first_child()
+        while b and b.nid != nid:
+            b = b.get_next_sibling()
+        ok, r = b.compute_bounds(self.doc_tabs) if b else (False, None)
+        if ok:
+            adj = self.tab_scroll.get_hadjustment()
+            if r.get_x() < adj.get_value():
+                adj.set_value(r.get_x())
+            elif r.get_x() + r.get_width() > adj.get_value() + adj.get_page_size():
+                adj.set_value(r.get_x() + r.get_width() - adj.get_page_size())
+        return False
+
+    def open_doc_tab(self, nid):
+        if self._loading or (self.current and self.current["id"] == nid):
+            return
+        self.select(nid)
+        row = self.listbox.get_first_child()
+        while row:
+            if getattr(row, "note_id", None) == nid:
+                self._loading = True
+                self.listbox.select_row(row)
+                self._loading = False
+                break
+            row = row.get_next_sibling()
+
+    def close_doc_tab(self, nid=None):
+        """Tab schließen (der Eintrag bleibt erhalten); der letzte Tab führt zurück auf Home."""
+        tabs = self.open_tabs[self.kind]
+        nid = nid or (self.current and self.current["id"])
+        if nid not in tabs:
+            return
+        i = tabs.index(nid)
+        tabs.remove(nid)
+        if self.current and self.current["id"] == nid:
+            if tabs:
+                self.select(tabs[min(i, len(tabs) - 1)])
+                self.refresh_list()
+            else:
+                self.go_home()
+        else:
+            self._tabs_sig = None
+            self.update_doc_tabs()
+
+    def cycle_doc_tab(self, d):
+        tabs = self.open_tabs[self.kind]
+        if len(tabs) > 1 and self.current and self.current["id"] in tabs:
+            self.select(tabs[(tabs.index(self.current["id"]) + d) % len(tabs)])
+            self.refresh_list()
 
     # ================= Checklisten (nur Notizen) =================
     def line_box(self, line):
@@ -3907,13 +4211,18 @@ class Notes(Gtk.Application):
         return ok
 
     def export_dialog(self, fmt):
-        if not self.docs or not self.current:
+        if not self.current or fmt not in xp.FORMATS or self.kind not in xp.FORMATS[fmt][3]:
+            return
+        if self.tex and fmt == "pdf" and not self.latex.pdf_path():
+            self.notify("Noch kein PDF – erst kompilieren (Strg+S)")
             return
         self.flush(force=True)
+        if self.tex:
+            self.latex.save_files()
         n = self.current
         label, pattern = EXPORTS[fmt]
-        dlg = Gtk.FileDialog(title=f"Als {label} exportieren")
-        name = "".join(c for c in (n["title"].strip() or "Dokument") if c not in '/\\:*?"<>|')[:80]
+        dlg = Gtk.FileDialog(title=f"Als {label} speichern")
+        name = share.safe_name(self.display_title(n) or "Dokument")[:80]
         dlg.set_initial_name(f"{name}.{fmt}")
         src = n.get("source")
         folder = os.path.dirname(src) if src and os.path.isdir(os.path.dirname(src)) else \
@@ -3936,29 +4245,56 @@ class Notes(Gtk.Application):
             self.export_to(path, fmt)
         dlg.save(self.win, None, done)
 
+    def export_blocks(self):
+        """Blockmodell des geöffneten Eintrags – Words direkt, Notizen über Markdown."""
+        if self.docs:
+            return self.writer.to_model()
+        n = self.current
+        return df.markdown_blocks(md.from_note(n["text"], n.get("rich"), n["title"]))
+
     def export_to(self, path, fmt):
         n = self.current
-        blocks = self.writer.to_model()
-        title = n["title"].strip()
+        title = n["title"].strip() or self.display_title(n)
+        pages = 0
         try:
-            page = self.writer.page
-            if fmt == "docx":
-                df.write_docx(blocks, path, title, page)
-            elif fmt == "odt":
-                import odf
-                odf.write_odt(blocks, path, title, page)
-            elif fmt == "pdf":
-                import render
-                pages = render.write_pdf(blocks, path, title, page)
+            if self.tex:
+                if fmt == "pdf":
+                    import shutil
+                    shutil.copyfile(self.latex.pdf_path(), path)
+                elif fmt == "zip":
+                    xp.zip_dir(self.latex.project_dir(), path)
+                else:
+                    with open(path, "w", encoding="utf-8") as f:
+                        f.write(self.latex.text() if fmt == "tex" else share.plain(n, "latex"))
             else:
-                text = {"txt": lambda: df.export_text(blocks), "md": lambda: df.to_markdown(blocks),
-                        "html": lambda: df.to_html(blocks, title)}[fmt]()
-                with open(path, "w", encoding="utf-8") as f:
-                    f.write(text)
+                blocks = self.export_blocks()
+                page = self.writer.page if self.docs else None
+                if fmt == "docx":
+                    df.write_docx(blocks, path, title, page)
+                elif fmt == "odt":
+                    import odf
+                    odf.write_odt(blocks, path, title, page)
+                elif fmt == "pdf":
+                    import render
+                    pages = render.write_pdf(blocks, path, title, page)
+                elif fmt == "rtf":
+                    xp.write_rtf(blocks, path, title)
+                elif fmt == "epub":
+                    xp.write_epub(blocks, path, title)
+                else:
+                    if not self.docs and fmt == "md":
+                        text = md.from_note(n["text"], n.get("rich"), n["title"])
+                    elif not self.docs and fmt == "txt":
+                        text = share.plain(n, "notes")
+                    else:
+                        text = {"txt": lambda: df.export_text(blocks), "md": lambda: df.to_markdown(blocks),
+                                "html": lambda: df.to_html(blocks, title)}[fmt]()
+                    with open(path, "w", encoding="utf-8") as f:
+                        f.write(text)
         except Exception as e:  # noqa: BLE001
             self.notify(f"Export fehlgeschlagen: {e}")
             return
-        extra = f" · {pages} Seite{'n' if pages != 1 else ''}" if fmt == "pdf" else ""
+        extra = f" · {pages} Seite{'n' if pages != 1 else ''}" if fmt == "pdf" and pages else ""
         self.notify(f"Gespeichert: {os.path.basename(path)}{extra}")
 
     def print_doc(self):
@@ -4322,6 +4658,48 @@ class Notes(Gtk.Application):
             print("datist:", e, file=sys.stderr)
         return False
 
+    def update_pathbar(self, notes, keep):
+        """Pfadleiste über der Liste (wie in filist): Bereich › Ordner des gewählten Eintrags, rechts die Anzahl."""
+        while (c := self.crumbs.get_first_child()):
+            self.crumbs.remove(c)
+        crumbs = []
+        icon, name = KINDS[self.kind][1], KINDS[self.kind][0].lower()
+        if self.mode == "trash":
+            crumbs.append(("󰆴 papierkorb", lambda: self.set_mode("notes")))
+        elif self.mode == "archive":
+            crumbs.append(("󰀼 archiv", lambda: self.set_mode("notes")))
+        else:
+            crumbs.append((f"{icon} {name}", lambda: (setattr(self, "label_filter", None), self.refresh_list())))
+            if self.label_filter:
+                crumbs.append((f"#{self.label_filter}", lambda: None))
+            cur = self.stores[self.kind].notes.get(keep) if keep else None
+            fo = (cur.get("folder") if cur else "") or ""
+            if fo and self.use_folders():
+                acc = ""
+                for part in fo.split("/"):
+                    acc = f"{acc}/{part}" if acc else part
+                    crumbs.append((f"󰉋 {part}", lambda f=acc: self.reveal_folder(f)))
+        for i, (text, cb) in enumerate(crumbs):
+            if i:
+                sep = Gtk.Label(label="›")
+                sep.add_css_class("nt-sep")
+                self.crumbs.append(sep)
+            b = Gtk.Button(label=text, focus_on_click=False)
+            b.add_css_class("nt-crumb")
+            if i == len(crumbs) - 1:
+                b.add_css_class("last")
+            b.connect("clicked", lambda *_, f=cb: f())
+            self.crumbs.append(b)
+        self.path_count.set_label(str(len(notes)))
+
+    def reveal_folder(self, f):
+        """Ordner in der Liste aufklappen (Klick auf einen Pfadteil)."""
+        _, closed = self.folder_prefs()
+        if f in closed:
+            closed.remove(f)
+            self.save_prefs()
+            self.refresh_list()
+
     def refresh_list(self, keep=None):
         self.queue_recent()
         keep = keep or (self.current and self.current["id"])
@@ -4361,6 +4739,7 @@ class Notes(Gtk.Application):
         if sel:
             self.listbox.select_row(sel)
         self._loading = False
+        self.update_pathbar(notes, keep)
         n_trash, n_arch = len(self.store.trashed()), len(self.store.archived())
         self.trash_link.set_label(f"󰆴  Papierkorb ({n_trash})")
         self.archive_link.set_label(f"󰀼  Archiv ({n_arch})")
@@ -4552,6 +4931,7 @@ class Notes(Gtk.Application):
             self.style_checks()
         if not from_list:
             self.refresh_list(keep=nid)
+        self.apply_doc_lang()
         self.nav_note()
         if old is not n:
             self.offer_pos(n, auto)
@@ -4905,6 +5285,8 @@ class Notes(Gtk.Application):
         if v is None:
             return
         self._pos_seq = seq = getattr(self, "_pos_seq", 0) + 1
+        if self.docs:
+            self.writer.cancel_scroll_reset()
         buf = v.get_buffer()
         adj = sc.get_vadjustment()
         state = {"set": None}

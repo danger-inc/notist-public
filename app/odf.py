@@ -349,6 +349,7 @@ class _Writer:
 
 
 def write_odt(blocks, path, title="", page=None):
+    blocks = df.accept_all(blocks)
     w = _Writer(blocks, page, title)
     body = w.body()
     content = (f'<?xml version="1.0" encoding="UTF-8"?><office:document-content {NSDECL} office:version="1.3">'

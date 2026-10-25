@@ -32,8 +32,28 @@ elif (( ! UPDATE )); then
 fi
 echo
 
+# ---------------------------------------------------------------- Daten sichern (nur Sicherheitsnetz)
+# Der Installer fasst ~/.local/share/notes/data, die Einstellungen und ~/Documents/notist nie an – er kopiert nur den
+# Programmcode. Trotzdem legt er vorher eine ZIP-Sicherung der Daten an (die letzten 5 bleiben).
+DATA_DIR="${NOTES_DATA_DIR:-$HOME/.local/share/notes/data}"
+if [[ -d "$DATA_DIR" ]] && [[ -n "$(ls -A "$DATA_DIR" 2>/dev/null)" ]]; then
+    BK="$HOME/.local/share/notes/backups"
+    mkdir -p "$BK"
+    python3 - "$DATA_DIR" "$BK/vor-installation-$(date +%Y%m%d-%H%M%S).zip" <<'PY' && echo "Daten gesichert in $BK" || warn "Datensicherung nicht möglich – Daten bleiben trotzdem unangetastet."
+import os, sys, zipfile
+src, dest = sys.argv[1:3]
+with zipfile.ZipFile(dest, "w", zipfile.ZIP_DEFLATED) as z:
+    for root, _d, files in os.walk(src):
+        for f in files:
+            p = os.path.join(root, f)
+            z.write(p, os.path.relpath(p, os.path.dirname(src)))
+PY
+    ls -1t "$BK"/vor-installation-*.zip 2>/dev/null | tail -n +6 | xargs -r rm -f
+fi
+
 # ---------------------------------------------------------------- App kopieren
 say "Kopiere notist nach $APP_DIR ..."
+case "$APP_DIR" in "$DATA_DIR"|"$DATA_DIR"/*) echo "Abbruch: Programmordner liegt im Datenordner." >&2; exit 1;; esac
 mkdir -p "$APP_DIR" "$BIN" "$APPS" "$FONTS" "$ICONS"
 cp -rf "$SRC/app/." "$APP_DIR/"
 chmod +x "$APP_DIR/notes.py"

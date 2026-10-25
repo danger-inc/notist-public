@@ -18,6 +18,7 @@ except (ValueError, ImportError):
     Poppler = None
 
 import latexdata as ld
+import pkgcmds
 import texextra as tx
 from writer import WrapLayout, file_menu, popover_button, rgba, tool
 
@@ -271,8 +272,10 @@ def parse_log(log, out=""):
 LATEX_FILE_MENU = (
     (None, (("󰝰", ".tex-Datei öffnen …", "strg+o", "win.doc-import"),)),
     ("Exportieren", (("󰈦", "PDF speichern unter …", ".pdf", "win.latex-export::pdf"),
-                     ("󰗀", ".tex-Datei speichern unter …", ".tex", "win.latex-export::tex"))),
+                     ("󰗀", ".tex-Datei speichern unter …", ".tex", "win.latex-export::tex"),
+                     ("󰗄", "Projekt als ZIP …", ".zip", "win.export-as::zip"))),
     ("Weiteres", (("󰈬", "In ein Words-Dokument umwandeln", "", "win.latex-to-words"),
+                  ("󰏗", "LaTeX-Pakete …", "", "win.latex-packages"),
                   ("󰉋", "Projektordner öffnen (Bilder usw.)", "", "win.latex-folder"))),
 )
 
@@ -592,6 +595,8 @@ class LatexEditor(Gtk.Box):
                                  left_margin=8, right_margin=10, pixels_inside_wrap=1, monospace=True)
         self.view.add_css_class("tex")
         __import__("writer").calm_handles(self.view)
+        self._scan_failed = set()
+        pkgcmds.merge_into(ld)             # Befehle bereits eingelesener Pakete
         self.bufs = []                      # alle Puffer (Haupt + Zusatzdateien), für Farben & Tags
         self.spell = None
         self.main_buf = self.new_buffer()
@@ -752,6 +757,7 @@ class LatexEditor(Gtk.Box):
         g = group(ob, self.find_btn, tool("󰈈", "Cursorzeile im PDF zeigen (Strg+J)\nUmgekehrt: Doppelklick ins PDF",
                                          lambda *_: self.forward_search()))
         g = group(tool("󰘦 Befehle", "Alle LaTeX-Befehle mit Erklärung (F1)", lambda *_: self.open_overview()),
+                  tool("󰏗", "LaTeX-Pakete: suchen, vorab laden, Speicherordner öffnen", lambda *_: self.open_packages()),
                   tool("󰂺", "Quellen: Literatur verwalten und zitieren", lambda *_: self.open_bib()), hb)
         g.add_css_class("last")
         for g in groups:
@@ -826,8 +832,9 @@ class LatexEditor(Gtk.Box):
         return mb
 
     def build_findbar(self):
-        bar = Gtk.Box(spacing=6, margin_bottom=6)
-        self.find_entry = Gtk.SearchEntry(placeholder_text="Im Quelltext suchen", hexpand=True)
+        bar = Gtk.Box(spacing=6)
+        __import__("findbar").style(bar)
+        self.find_entry = Gtk.SearchEntry(placeholder_text="Im Quelltext suchen", width_chars=22)
         self.find_entry.add_css_class("pb")
         self.find_entry.connect("search-changed", lambda *_: self.run_search())
         self.find_entry.connect("activate", lambda *_: self.find_step(1))
@@ -1075,6 +1082,10 @@ class LatexEditor(Gtk.Box):
         v = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, can_focus=False)
         self.clist = Gtk.ListBox(selection_mode=Gtk.SelectionMode.SINGLE, can_focus=False)
         self.clist.connect("row-activated", lambda lb, row: self.accept_complete(row.get_index()))
+        hov = Gtk.EventControllerMotion()                  # Zeiger über einem Vorschlag = markiert (Enter nimmt ihn)
+        hov.connect("motion", lambda c, x, y: (r := self.clist.get_row_at_y(int(y))) and r is not self.clist.get_selected_row()
+                    and (self.clist.select_row(r), setattr(self, "_navigated", True)))
+        self.clist.add_controller(hov)
         self.csc = Gtk.ScrolledWindow(hscrollbar_policy=Gtk.PolicyType.NEVER, propagate_natural_height=True,
                                       max_content_height=230, min_content_width=380, can_focus=False)
         self.csc.set_child(self.clist)
@@ -1591,7 +1602,7 @@ class LatexEditor(Gtk.Box):
                 self.move_complete(6 if keyval == Gdk.KEY_Page_Down else -6)
                 return True
             if keyval in (Gdk.KEY_Tab, Gdk.KEY_ISO_Left_Tab) or \
-                    (keyval in (Gdk.KEY_Return, Gdk.KEY_KP_Enter) and self._navigated):
+                    (keyval in (Gdk.KEY_Return, Gdk.KEY_KP_Enter) and not shift):
                 row = self.clist.get_selected_row()
                 self.accept_complete(row.get_index() if row else 0)
                 return True
@@ -2193,8 +2204,61 @@ class LatexEditor(Gtk.Box):
         if w and w.get_visible():
             w.present()
             return
-        self._overview = tx.CommandOverview(self.win, lambda s, p: self.insert_snippet(s, p), self.save_cheatsheet)
+        self._overview = tx.CommandOverview(self.win, lambda s, p: self.insert_snippet(s, p), self.save_cheatsheet,
+                                            self.scan_commands, self.open_packages)
         self._overview.present()
+
+    # ---- Pakete: Befehle automatisch ins Verzeichnis, Paket-Manager
+    def packages_changed(self):
+        """Neu eingelesene Paketbefehle in Vorschläge und Übersicht übernehmen."""
+        pkgcmds.merge_into(ld)
+        ov = getattr(self, "_overview", None)
+        if ov and ov.get_visible():
+            ov.reload()
+
+    def auto_scan(self):
+        """Im Dokument benutzte Pakete, deren Befehle noch fehlen, im Hintergrund einlesen (nur wenn schon offline da
+        oder Internet vorhanden – schlägt es fehl, bleibt alles wie es war)."""
+        exe = which_tectonic()
+        if not exe or not self.nid:
+            return
+        todo = [p for p in pkgcmds.used_packages(self.text()) if p not in pkgcmds.scanned()
+                and (p + ".sty" in pkgcmds.available() or p + ".cls" in pkgcmds.available())
+                and p not in self._scan_failed]
+        if not todo:
+            return
+        self._scan_failed.update(todo)                       # pro Sitzung nur ein Versuch je Paket
+
+        def done(pk, cm):
+            if cm:                                           # still: neue Befehle erscheinen einfach in den Vorschlägen
+                GLib.idle_add(lambda: (self.packages_changed(), False)[-1])
+        pkgcmds.scan_async(exe, todo, done)
+
+    def scan_commands(self):
+        exe = which_tectonic()
+        if not exe:
+            self.notify("Tectonic ist noch nicht eingerichtet")
+            return
+        have = {os.path.splitext(f)[0] for f in pkgcmds.cached() if f.endswith(".sty")}
+        todo = sorted((have | set(pkgcmds.used_packages(self.text()))) - pkgcmds.scanned())
+        if not todo:
+            self.notify("Alle Pakete sind schon eingelesen")
+            return
+        self.notify(f"Lese Befehle aus {len(todo)} Paketen …")
+
+        def done(pk, cm):
+            GLib.idle_add(lambda: (self.packages_changed(), self.notify(f"{cm} Befehle aus {pk} Paketen übernommen"),
+                                   False)[-1])
+        pkgcmds.scan_async(exe, todo, done)
+
+    def open_packages(self):
+        import pkgmanager
+        w = getattr(self, "_pkgwin", None)
+        if w and w.get_visible():
+            w.present()
+            return
+        self._pkgwin = pkgmanager.PackageManager(self.win, which_tectonic, self.text, self.packages_changed)
+        self._pkgwin.present()
 
     def save_cheatsheet(self):
         d = os.path.join(BUILD, "spickzettel")
@@ -2579,6 +2643,7 @@ class LatexEditor(Gtk.Box):
         with open(os.path.join(proj, "main.tex"), "w", encoding="utf-8") as f:
             f.write(text)
         self.last_written = text
+        GLib.timeout_add(2500, lambda: self.auto_scan() or False)    # neue \usepackage → Befehle einlesen
         name, exe = self.compilers[0]
         search = os.path.dirname(self.source) if self.source and os.path.isdir(os.path.dirname(self.source)) else None
         cmd = compile_cmd(name, exe, outdir, search, bib="\\bibliography{" in text)

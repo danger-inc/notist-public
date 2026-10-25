@@ -405,7 +405,7 @@ def cheatsheet_source():
 class CommandOverview(Gtk.Window):
     """Alle Befehle mit Erklärung, Beispiel und Paket – durchsuchbar, Klick fügt ein."""
 
-    def __init__(self, parent, on_insert, on_pdf=None):
+    def __init__(self, parent, on_insert, on_pdf=None, on_scan=None, on_packages=None):
         super().__init__(title="LaTeX-Befehle", transient_for=parent, default_width=860, default_height=680)
         self.add_css_class("settings")
         self.add_css_class("pb-window")
@@ -442,6 +442,14 @@ class CommandOverview(Gtk.Window):
             b.add_css_class("pb"); b.add_css_class("small")
             b.connect("clicked", lambda *_: on_pdf())
             top.append(b)
+        for icon, text, tip, cb in (("󰏗", "pakete …", "Pakete suchen, vorab laden, Speicherordner öffnen", on_packages),
+                                    ("󰍉", "nach befehlen suchen", "Befehle der benutzten und geladenen Pakete einlesen",
+                                     on_scan)):
+            if cb:
+                b = Gtk.Button(label=f"{icon}  {text}", tooltip_text=tip, focus_on_click=False)
+                b.add_css_class("pb"); b.add_css_class("small")
+                b.connect("clicked", lambda *_, f=cb: f())
+                top.append(b)
         right.append(top)
         hint = Gtk.Label(xalign=0, label="Klick auf eine Zeile fügt den Befehl an der Cursorstelle ein.")
         hint.add_css_class("set-sub")
@@ -459,6 +467,11 @@ class CommandOverview(Gtk.Window):
 
     def set_cat(self, cat):
         self.cat = cat
+        self.fill()
+
+    def reload(self):
+        """Nach neu eingelesenen Paketbefehlen: Liste und Rubriken neu aufbauen."""
+        self.items = overview_items()
         self.fill()
 
     def fill(self):

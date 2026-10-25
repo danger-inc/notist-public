@@ -1,7 +1,7 @@
 # Dokument-Modus von notist: ein kleines Textverarbeitungsprogramm auf Basis von Gtk.TextView.
 # Seite (A4) wird unter den Text gezeichnet, Formatierung steckt in TextTags, Tabellen/Linien/Seitenumbrüche
 # sind eingebettete Widgets. Das Dokument-Modell (Blöcke) und DOCX/PDF stecken in docfmt.py / render.py.
-import base64, copy, datetime, math, os, re
+import base64, copy, datetime, json, math, os, re
 
 import gi
 gi.require_version("Gtk", "4.0")
@@ -11,6 +11,7 @@ gi.require_version("GdkPixbuf", "2.0")
 from gi.repository import Gdk, GdkPixbuf, Gio, GLib, GObject, Graphene, Gtk, Pango
 
 import docfmt as df
+from review import ReviewMixin
 import i18n
 from mdnotes import looks_like_markdown as md_detect
 
@@ -104,8 +105,6 @@ button.tcol.cur { border-color: @foreground; border-width: 2px; }
 .wpb { font-size: 10px; font-weight: 800; letter-spacing: 2px; color: alpha(@foreground, 0.45);
     border-top: 2px dashed alpha(@foreground, 0.3); padding-top: 2px; margin: 8px 0; }
 .light .wpb { color: rgba(0,0,0,0.45); border-color: rgba(0,0,0,0.3); }
-.findbar { margin: 0 0 6px 0; }
-.findbar entry { min-height: 26px; }
 .wstatus { font-size: 11px; color: alpha(@foreground, 0.55); }
 .wstatus button { padding: 0 6px; min-height: 18px; }
 popover.wpop > contents { background-color: alpha(@background, 0.96); background-image: none; border: 1px solid @primary;
@@ -311,7 +310,9 @@ FILE_MENU = (
                      ("󰈦", "PDF", ".pdf", "win.doc-export::pdf"),
                      ("󰦨", "Text", ".txt", "win.doc-export::txt"),
                      ("󰍔", "Markdown", ".md", "win.doc-export::md"),
-                     ("󰖟", "Webseite", ".html", "win.doc-export::html"))),
+                     ("󰖟", "Webseite", ".html", "win.doc-export::html"),
+                     ("󰈮", "Rich Text", ".rtf", "win.doc-export::rtf"),
+                     ("󰂺", "E-Book", ".epub", "win.doc-export::epub"))),
     ("Weiteres", (("󰐪", "Drucken …", "", "win.doc-print"),
                   ("󰿈", "In ein LaTeX-Dokument umwandeln", "", "win.doc-to-latex"))),
 )
@@ -348,7 +349,10 @@ def file_menu(entries=FILE_MENU, sub="Wird beim Schreiben automatisch gespeicher
         for icon, label, hint, action, *raw in items:
             b = Gtk.Button(focus_on_click=False)
             b.add_css_class("fm-item")
-            b.set_action_name(action) if "::" not in action else b.set_detailed_action_name(action)
+            if callable(action):                       # eigene Funktion statt Fenster-Aktion (z. B. Rechtsklick-Menü)
+                b.connect("clicked", lambda _b, cb=action: GLib.idle_add(lambda: (cb(), False)[1]))
+            else:
+                b.set_action_name(action) if "::" not in action else b.set_detailed_action_name(action)
             r = Gtk.Box(spacing=10)
             i = Gtk.Label(label=icon)
             i.add_css_class("fm-icon")
@@ -571,21 +575,35 @@ def close_outside(pop):
 
 
 def calm_handles(tv):
-    """Touch: Nach einem Fingertipp zeigt GTK runde Griffpunkte am Cursor. Tippen auf der Tastatur blendet sie
-    nicht aus (die Eingabemethode bekommt die Taste zuerst) – sie standen dann als kleine weiße Punkte im Text
-    und wanderten mit. Also: Taste → Griffe unsichtbar (CSS ist-typing), nächste Berührung → wieder da."""
+    """GTK zeigt runde Griffpunkte am Cursor, sobald es meint, es werde per Touch bedient – auch nach Scrollen mit
+    Touchpad/Rad oder Tippen auf der Tastatur (die Eingabemethode bekommt die Taste zuerst). Sie standen dann als
+    kleine weiße Punkte über/unter dem Text und wanderten mit. Also: standardmäßig unsichtbar (CSS ist-typing),
+    nur eine echte Berührung am Touchscreen zeigt sie; Taste, Maus, Scrollen blenden sie wieder aus."""
+    tv.add_css_class("ist-typing")
+    hide = lambda *_: (tv.has_css_class("ist-typing") or tv.add_css_class("ist-typing"), False)[1]
     k = Gtk.EventControllerKey()
     k.set_propagation_phase(Gtk.PropagationPhase.CAPTURE)
-    k.connect("key-pressed", lambda *_: (tv.has_css_class("ist-typing") or tv.add_css_class("ist-typing"), False)[1])
+    k.connect("key-pressed", hide)
     tv.add_controller(k)
+    sc = Gtk.EventControllerScroll(flags=Gtk.EventControllerScrollFlags.BOTH_AXES)
+    sc.set_propagation_phase(Gtk.PropagationPhase.CAPTURE)
+    sc.connect("scroll", hide)
+    tv.add_controller(sc)
     g = Gtk.GestureClick(button=0)
     g.set_propagation_phase(Gtk.PropagationPhase.CAPTURE)
-    g.connect("pressed", lambda *_: tv.remove_css_class("ist-typing"))
+
+    def pressed(gest, *_):
+        dev = gest.get_current_event_device()
+        if dev is not None and dev.get_source() == Gdk.InputSource.TOUCHSCREEN:
+            tv.remove_css_class("ist-typing")
+        else:
+            hide()
+    g.connect("pressed", pressed)
     tv.add_controller(g)
 
 
 CSS += """
-textview.ist-typing cursor-handle { opacity: 0; }
+textview.ist-typing cursor-handle { opacity: 0; min-width: 0; min-height: 0; }
 """
 
 
@@ -1397,7 +1415,7 @@ class PageView(Gtk.TextView):
             self.w.draw_markers(snap)
 
 
-class Writer(Gtk.Box):
+class Writer(ReviewMixin, Gtk.Box):
     """on_change(): Text/Titel geändert. Formatierungs-Status und Ansicht verwaltet der Writer selbst."""
 
     def __init__(self, win, on_change, settings):
@@ -1467,6 +1485,7 @@ class Writer(Gtk.Box):
         self.buf.connect_after("insert-text", self.after_insert)
         self.buf.connect("changed", self.on_buffer_changed)
         self.buf.connect("mark-set", self.on_mark_set)
+        self.buf.connect("delete-range", lambda b, s, e: self.track_delete(b, s, e))
         self.buf.connect_after("delete-range", lambda *_: self.invalidate())
         k = Gtk.EventControllerKey()
         k.set_propagation_phase(Gtk.PropagationPhase.CAPTURE)
@@ -1479,6 +1498,8 @@ class Writer(Gtk.Box):
         zoom.connect("scroll", self.on_scroll)
         self.view.add_controller(zoom)
         self.view.connect("paste-clipboard", self.on_paste)
+        self.view.connect("copy-clipboard", lambda v: self.copy_rich(False))
+        self.view.connect("cut-clipboard", lambda v: self.copy_rich(True))
         drop = Gtk.DropTarget.new(Gdk.FileList, Gdk.DragAction.COPY)
         drop.connect("drop", self.on_drop)
         self.view.add_controller(drop)
@@ -1537,7 +1558,8 @@ class Writer(Gtk.Box):
         self._short = False
         self.tab_btns = {}
         group_btn = None
-        for key, label in (("start", "Start"), ("insert", "Einfügen"), ("layout", "Layout"), ("view", "Ansicht")):
+        for key, label in (("start", "Start"), ("insert", "Einfügen"), ("layout", "Layout"), ("review", "Überprüfen"),
+                           ("view", "Ansicht")):
             b = Gtk.ToggleButton(label=label, focus_on_click=False, can_focus=False)
             b.add_css_class("rtab")
             if group_btn:
@@ -1623,7 +1645,8 @@ class Writer(Gtk.Box):
                tool("A<sup>+</sup>", "Schrift größer (Strg+Umschalt+>)", lambda *_: self.grow_font(1), markup=True),
                tool("A<sup>−</sup>", "Schrift kleiner (Strg+Umschalt+<)", lambda *_: self.grow_font(-1), markup=True)],
               [*(self.tools[k] for k in CHAR_PLAIN), Gtk.Separator(), self.fg_btn, self.hl_btn,
-               tool("󰉥", "Formatierung löschen (Strg+Leertaste)", lambda *_: self.clear_format())])
+               tool("󰉥", "Formatierung löschen (Strg+Leertaste)", lambda *_: self.clear_format()),
+               self.case_button(), self.painter_button()])
 
         for key, icon, tip in (("left", "󰉢", "Linksbündig (Strg+L)"), ("center", "󰉠", "Zentriert (Strg+E)"),
                                ("right", "󰉣", "Rechtsbündig (Strg+R)"), ("justify", "󰉡", "Blocksatz (Strg+J)")):
@@ -1756,6 +1779,9 @@ class Writer(Gtk.Box):
         lay = page("layout")
         group(lay, "Seite einrichten", [self.page_size_button(), self.page_orient_button(), self.page_margin_button()])
         group(lay, "Kopf- & Fußzeile", [self.page_hf_button(), self.page_num_button()])
+        group(lay, "Seitenhintergrund", [self.page_watermark_button(), self.page_color_button(),
+                                         self.page_border_button()])
+        group(lay, "Zeilennummern", [self.page_lines_button()])
         group(lay, "Einzug", [big_tool("󰉵", "Weniger", "Einzug verkleinern", lambda *_: self.change_indent(-1)),
                               big_tool("󰉶", "Mehr", "Einzug vergrößern", lambda *_: self.change_indent(1))])
         sp_row = Gtk.Box(spacing=2)
@@ -1770,6 +1796,9 @@ class Writer(Gtk.Box):
         group(lay, "Zeilenabstand", sp_row)
         group(lay, "Umbruch", [big_tool("󰛗", "Seite", "Seitenumbruch (Strg+Enter)", lambda *_: self.insert_block("pb"))],
               last=True)
+
+        # ================= Überprüfen =================
+        self.build_review(page("review"), group)
 
         # ================= Ansicht =================
         view = page("view")
@@ -2127,9 +2156,103 @@ class Writer(Gtk.Box):
         pop.connect("show", lambda *_: self.sync_page_ui())
         return mb
 
+    WATERMARKS = ("ENTWURF", "VERTRAULICH", "KOPIE", "MUSTER")
+    PAGE_COLORS = (("", "ohne"), ("#fbf3dc", "Creme"), ("#e8f0fb", "Hellblau"), ("#e6f4e6", "Hellgrün"),
+                   ("#f6e8f2", "Rosa"), ("#f0f0f0", "Hellgrau"), ("#ffffff", "Weiß"))
+
+    def page_watermark_button(self):
+        box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6)
+        h = Gtk.Label(label="WASSERZEICHEN", xalign=0)
+        h.add_css_class("wpop-head")
+        box.append(h)
+        self.wm_entry = Gtk.Entry(placeholder_text="Text quer über jede Seite", width_chars=26)
+        self.wm_entry.add_css_class("pb")
+        self.wm_entry.connect("changed", lambda e: self._sync or self.set_page({**self.page, "watermark": e.get_text()}))
+        box.append(self.wm_entry)
+        row = Gtk.Box(spacing=4)
+        for t in self.WATERMARKS:
+            b = Gtk.Button(label=t, focus_on_click=False)
+            b.add_css_class("wt")
+            b.connect("clicked", lambda _b, t=t: (self.wm_entry.set_text(t)))
+            row.append(b)
+        box.append(row)
+        rm = Gtk.Button(label="Wasserzeichen entfernen", focus_on_click=False)
+        rm.connect("clicked", lambda *_: self.wm_entry.set_text(""))
+        box.append(rm)
+        hint = Gtk.Label(xalign=0, wrap=True, max_width_chars=34, label="Erscheint in der Seitenansicht, im PDF und beim Drucken.")
+        hint.add_css_class("hf-help")
+        box.append(hint)
+        mb, pop = popover_button(big_label("󰏪", "Wasserzeichen"), "Text quer über die Seiten", box, big=True)
+        pop.connect("show", lambda *_: self.sync_page_ui())
+        return mb
+
+    def page_color_button(self):
+        box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6)
+        h = Gtk.Label(label="SEITENFARBE", xalign=0)
+        h.add_css_class("wpop-head")
+        box.append(h)
+        grid = Gtk.FlowBox(selection_mode=Gtk.SelectionMode.NONE, max_children_per_line=4, column_spacing=4, row_spacing=4)
+        for hexcol, name in self.PAGE_COLORS:
+            b = Gtk.Button(focus_on_click=False, tooltip_text=name)
+            b.add_css_class("wt")
+            lab = Gtk.Label(label="󰤮" if not hexcol else "  ")
+            b.set_child(lab)
+            if hexcol:
+                css = Gtk.CssProvider()
+                css.load_from_string(f"button.pgc-{hexcol[1:]} {{ background-color: {hexcol}; background-image: none; "
+                                     f"border: 1px solid rgba(128,128,128,0.7); min-width: 30px; min-height: 22px; }}")
+                Gtk.StyleContext.add_provider_for_display(Gdk.Display.get_default(), css,
+                                                          Gtk.STYLE_PROVIDER_PRIORITY_APPLICATION + 5)
+                b.add_css_class("pgc-" + hexcol[1:])
+            b.connect("clicked", lambda _b, c=hexcol: self.set_page({**self.page, "page_color": c}))
+            grid.append(b)
+        box.append(grid)
+        mb, pop = popover_button(big_label("󰉦", "Seitenfarbe"), "Farbe des Papiers", box, big=True)
+        return mb
+
+    def page_border_button(self):
+        self.border_btn = big_tool("󰿃", "Rahmen", "Rahmen um jede Seite", toggle=True)
+        self.border_btn.connect("toggled", lambda b: self._sync or self.set_page({**self.page, "border": b.get_active()}))
+        return self.border_btn
+
+    def page_lines_button(self):
+        box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6)
+        h = Gtk.Label(label="ZEILENNUMMERN", xalign=0)
+        h.add_css_class("wpop-head")
+        box.append(h)
+        self.lnum_mode = Gtk.DropDown.new_from_strings(["Aus", "Fortlaufend", "Auf jeder Seite neu"])
+        self.lnum_step = Gtk.SpinButton.new_with_range(1, 99, 1)
+        for label, w in (("Nummerierung", self.lnum_mode), ("Jede n-te Zeile", self.lnum_step)):
+            r = Gtk.Box(spacing=8)
+            r.append(Gtk.Label(label=label, xalign=0, hexpand=True))
+            w.add_css_class("wt")
+            r.append(w)
+            box.append(r)
+
+        def changed(*_):
+            if self._sync:
+                return
+            self.set_page({**self.page, "lnum": ("off", "continuous", "page")[self.lnum_mode.get_selected()],
+                           "lnum_step": int(self.lnum_step.get_value())})
+        self.lnum_mode.connect("notify::selected", changed)
+        self.lnum_step.connect("value-changed", changed)
+        hint = Gtk.Label(xalign=0, wrap=True, max_width_chars=34,
+                         label="Zeilen am linken Rand durchzählen – wie bei Gesetzestexten und Gutachten.")
+        hint.add_css_class("hf-help")
+        box.append(hint)
+        mb, pop = popover_button(big_label("󰎠", "Zeilen"), "Zeilennummern am Seitenrand", box, big=True)
+        pop.connect("show", lambda *_: self.sync_page_ui())
+        return mb
+
     def sync_page_ui(self):
         p = self.page
         self._sync = True
+        if hasattr(self, "wm_entry"):
+            if self.wm_entry.get_text() != p.get("watermark", ""):
+                self.wm_entry.set_text(p.get("watermark", ""))
+            self.border_btn.set_active(bool(p.get("border")))
+            self.lnum_mode.set_selected(("off", "continuous", "page").index(p.get("lnum", "off")))
+            self.lnum_step.set_value(p.get("lnum_step", 1))
         for k, b in self.size_btns.items():
             b.set_active(k == p["size"])
         for k, b in self.orient_btns.items():
@@ -2266,6 +2389,7 @@ class Writer(Gtk.Box):
         bar = Gtk.Box()
         bar.set_layout_manager(WrapLayout(spacing=6, row_spacing=4))   # bricht in schmalen Fenstern um
         bar.add_css_class("findbar")
+        __import__("findbar").style(bar)
         self.find_entry = Gtk.SearchEntry(placeholder_text="Im Dokument suchen", width_chars=18)
         self.find_entry.add_css_class("pb")
         self.find_entry.connect("search-changed", lambda *_: self.run_search())
@@ -2396,6 +2520,7 @@ class Writer(Gtk.Box):
         self.sup_tag = b.create_tag("sup", scale=0.65)
         self.sub_tag = b.create_tag("sub", scale=0.65)
         self.search_tag = b.create_tag("search", background_rgba=rgba("#ffb300", 0.45))
+        self.make_review_tags()
         self.update_rise()
 
     def update_rise(self):
@@ -2416,9 +2541,12 @@ class Writer(Gtk.Box):
         if name.startswith("hl:"):
             return self.buf.create_tag(name, background_rgba=rgba(name[3:]))
         if name.startswith("link:"):
-            t = self.buf.create_tag(name, underline=Pango.Underline.SINGLE, foreground_rgba=rgba("#4a8fe7"))
+            t = self.buf.create_tag(name, underline=Pango.Underline.SINGLE,
+                                    foreground_rgba=getattr(self, "link_rgba", None) or rgba("#4a8fe7"))
             t.url = name[5:]
             return t
+        if name.startswith("cm:"):
+            return self.comment_tag(name[3:])
         if name.startswith("pi:"):
             return self.buf.create_tag(name)
         if name.startswith("m:"):
@@ -2530,6 +2658,7 @@ class Writer(Gtk.Box):
     def after_insert(self, buf, loc, text, length):
         if self._loading:
             return
+        self.track_inserted(loc, text)
         if length == 1 and text in " *_~`" and self.settings.get("markdown", True) and not self._md_id:
             ln = loc.get_line()
             self._md_id = GLib.idle_add(lambda: self.md_live(ln, text))
@@ -2572,6 +2701,8 @@ class Writer(Gtk.Box):
         self.page = df.norm_page(page, self.default_margin_mm())
         self.update_geometry()
         self.rescale_images()
+        self.apply_paper()
+        self.sync_review()
         if notify and not self._loading:
             self.on_change()
 
@@ -2608,9 +2739,22 @@ class Writer(Gtk.Box):
         self.undo_stack, self.redo_stack = [], []
         self.update_undo_buttons()
         self.sync_tools()
+        self.sync_review()
         self.update_counts()
         self.invalidate()
-        GLib.idle_add(lambda: self.scroll.get_vadjustment().set_value(0) and False)
+        self.cancel_scroll_reset()
+        self._reset_src = GLib.idle_add(self._scroll_reset)
+
+    def _scroll_reset(self):
+        self._reset_src = None
+        self.scroll.get_vadjustment().set_value(0)
+        return False
+
+    def cancel_scroll_reset(self):
+        """Das Hochscrollen nach dem Laden entfällt, wenn gleich die gemerkte Stelle wiederhergestellt wird."""
+        src, self._reset_src = getattr(self, "_reset_src", None), None
+        if src:
+            GLib.source_remove(src)
 
     def insert_run(self, r, at=None):
         it = at or self.buf.get_end_iter()
@@ -2630,6 +2774,10 @@ class Writer(Gtk.Box):
         for k, p in (("font", "font:"), ("size", "size:"), ("color", "fg:"), ("hl", "hl:"), ("link", "link:")):
             if r.get(k):
                 names.append(p + (f"{float(r[k]):g}" if k == "size" else str(r[k])))
+        if r.get("cm"):
+            names.append("cm:" + str(r["cm"]))
+        if r.get("tc") in ("ins", "del"):
+            names.append("tc:" + r["tc"])
         tags = [self.tag(n) for n in names]
         self.buf.insert_with_tags(it, r["text"], *[t for t in tags if t])
 
@@ -2664,16 +2812,28 @@ class Writer(Gtk.Box):
                 r["hl"] = n[3:]
             elif n.startswith("link:"):
                 r["link"] = n[5:]
+            elif n.startswith("cm:"):
+                r["cm"] = n[3:]
+            elif n in ("tc:ins", "tc:del"):
+                r["tc"] = n[3:]
         return r
 
-    def to_model(self):
+    def to_model(self, lo=None, hi=None):
+        """Dokument als Blockliste; mit lo/hi (Iteratoren) nur die Markierung."""
         out = []
         buf = self.buf
-        for line in range(buf.get_line_count()):
+        first, last = (lo.get_line(), hi.get_line()) if lo is not None else (0, buf.get_line_count() - 1)
+        for line in range(first, last + 1):
             ok, s = buf.get_iter_at_line(line)
             e = s.copy()
             if not e.ends_line():
                 e.forward_to_line_end()
+            partial = False
+            if lo is not None:
+                if line == first and s.compare(lo) < 0:
+                    s, partial = lo.copy(), True
+                if line == last and e.compare(hi) > 0:
+                    e = hi.copy()
             anchor = s.get_child_anchor()
             if anchor and anchor in self.blocks and e.get_offset() - s.get_offset() == 1 and \
                     self.blocks[anchor].kind != "fn":
@@ -2686,7 +2846,7 @@ class Writer(Gtk.Box):
                 else:
                     out.append({"t": w.kind})
                 continue
-            p = df.para(**{k: v for k, v in self.para_at(line).items()})
+            p = df.para(**({} if partial else {k: v for k, v in self.para_at(line).items()}))
             it = s.copy()
             while it.compare(e) < 0:
                 seg_end = it.copy()
@@ -2929,6 +3089,144 @@ class Writer(Gtk.Box):
                 return
             self.set_color(kind, "#%02x%02x%02x" % (round(c.red * 255), round(c.green * 255), round(c.blue * 255)))
         Gtk.ColorDialog(title="Farbe wählen", with_alpha=False).choose_rgba(self.win, None, None, done)
+
+    # ---- Groß-/Kleinschreibung ändern, Format übertragen
+    CASES = (("sentence", "Satzanfang groß"), ("lower", "kleinbuchstaben"), ("upper", "GROSSBUCHSTABEN"),
+             ("title", "Jedes Wort Groß"), ("toggle", "gROSS/kLEIN umschalten"))
+
+    def case_button(self):
+        box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=2)
+        h = Gtk.Label(label="GROSS-/KLEINSCHREIBUNG", xalign=0)
+        h.add_css_class("wpop-head")
+        box.append(h)
+        for key, label in self.CASES:
+            b = Gtk.Button(label=label, focus_on_click=False)
+            b.add_css_class("wt")
+            b.get_child().set_xalign(0)
+            b.connect("clicked", lambda _b, k=key: (self.change_case(k), self.case_pop.popdown()))
+            box.append(b)
+        mb, self.case_pop = popover_button("Aa", "Groß-/Kleinschreibung ändern", box)
+        return mb
+
+    @staticmethod
+    def recase(text, mode):
+        """Gleich lange Umwandlung (Zeichen für Zeichen), damit Formatierung und Anker an ihrer Stelle bleiben."""
+        def one(ch, fn):
+            r = fn(ch)
+            return r if len(r) == 1 else ch
+        if mode == "lower":
+            return "".join(one(c, str.lower) for c in text)
+        if mode == "upper":
+            return "".join(one(c, str.upper) for c in text)
+        if mode == "toggle":
+            return "".join(one(c, str.lower if c.isupper() else str.upper) for c in text)
+        out, start = [], True
+        for c in text:
+            if mode == "title":
+                out.append(one(c, str.upper) if start and c.isalpha() else one(c, str.lower) if c.isalpha() else c)
+                start = not c.isalpha() and c not in "'’-"
+            else:                                               # Satzanfang
+                if c.isalpha():
+                    out.append(one(c, str.upper) if start else one(c, str.lower))
+                    start = False
+                else:
+                    out.append(c)
+                    if c in ".!?\n":
+                        start = True
+        return "".join(out)
+
+    def change_case(self, mode):
+        buf = self.buf
+        b = buf.get_selection_bounds()
+        if not b:                                              # ohne Markierung: das Wort am Cursor
+            it = buf.get_iter_at_mark(buf.get_insert())
+            s, e = it.copy(), it.copy()
+            if not s.starts_word():
+                s.backward_word_start()
+            if not e.ends_word():
+                e.forward_word_end()
+            if s.equal(e):
+                return
+            b = (s, e)
+        if not self.editable:
+            return
+        s, e = b
+        self.checkpoint()
+        a, z = s.get_offset(), e.get_offset()
+        old = buf.get_text(s, e, True)
+        new = self.recase(old, mode)
+        if new == old:
+            self.focus_text()
+            return
+        self._loading = True
+        try:
+            for i, (o, n) in enumerate(zip(old, new)):
+                if o == n:
+                    continue
+                st = buf.get_iter_at_offset(a + i)
+                en = buf.get_iter_at_offset(a + i + 1)
+                tags = st.get_tags()
+                buf.delete(st, en)
+                at = buf.get_iter_at_offset(a + i)
+                buf.insert(at, n)
+                for t in tags:
+                    buf.apply_tag(t, buf.get_iter_at_offset(a + i), buf.get_iter_at_offset(a + i + 1))
+        finally:
+            self._loading = False
+        buf.select_range(buf.get_iter_at_offset(a), buf.get_iter_at_offset(z))
+        self.changed()
+        self.focus_text()
+
+    def painter_button(self):
+        self.painter = None
+        b = tool("󰃣", "Format übertragen: Text mit dem Format anklicken/markieren, dann Button, dann Zieltext markieren",
+                 toggle=True)
+        b.connect("toggled", self.on_painter_toggle)
+        self.tools["painter"] = b
+        return b
+
+    def on_painter_toggle(self, btn):
+        if self._sync:
+            return
+        if not btn.get_active():
+            self.painter = None
+            return
+        it = self.buf.get_iter_at_mark(self.buf.get_insert())
+        b = self.buf.get_selection_bounds()
+        if b:
+            it = b[0]
+        ch = [n for n in self.names(it) if n in CHAR_PLAIN or n.startswith(CHAR_PREFIX)]
+        if not b:                                          # Cursor: Format des Zeichens davor
+            prev = it.copy()
+            if prev.backward_char():
+                ch = [n for n in self.names(prev) if n in CHAR_PLAIN or n.startswith(CHAR_PREFIX)]
+        self.painter = (ch, self.para_at(it.get_line()))
+        self.view.set_cursor_from_name("copy")
+        self.focus_text()
+
+    def paint_format(self):
+        """Nach dem Markieren des Ziels: Zeichen- und Absatzformat übernehmen."""
+        if not self.painter or not self.editable:
+            return
+        b = self.buf.get_selection_bounds()
+        if not b:
+            return
+        chars, para = self.painter
+        self.checkpoint()
+        s, e = b
+        for t in self.all_tags(CHAR_PREFIX, CHAR_PLAIN):
+            self.buf.remove_tag(t, s, e)
+        for n in chars:
+            self.buf.apply_tag(self.tag(n), s, e)
+        for ln in self.selected_lines():
+            self.set_para(ln, {**self.para_at(ln), **{k: para[k] for k in ("style", "align", "spacing")}})
+        self.painter = None
+        self._sync = True
+        self.tools["painter"].set_active(False)
+        self._sync = False
+        self.view.set_cursor_from_name(None)
+        self.changed()
+        self.sync_tools()
 
     def clear_format(self):
         bounds = self.buf.get_selection_bounds()
@@ -3272,9 +3570,60 @@ class Writer(Gtk.Box):
         self.sync_tools()
         self.view.scroll_mark_onscreen(buf.get_insert())
 
+    BLOCKS_MIME = "application/x-notist-blocks"
+
+    def copy_rich(self, cut):
+        """Kopieren/Ausschneiden: neben dem Text die Blöcke mit Formatierung (Überschrift, Liste, Fett …) ablegen,
+        damit Einfügen in notist alles behält; andere Programme bekommen reinen Text."""
+        buf = self.buf
+        b = buf.get_selection_bounds()
+        if not b:
+            self.view.stop_emission_by_name("cut-clipboard" if cut else "copy-clipboard")
+            return
+        self.view.stop_emission_by_name("cut-clipboard" if cut else "copy-clipboard")
+        lo, hi = b
+        model = self.to_model(lo, hi)
+        text = buf.get_text(lo, hi, False)
+        data = json.dumps(model, ensure_ascii=False).encode()
+        self.view.get_clipboard().set_content(Gdk.ContentProvider.new_union([
+            Gdk.ContentProvider.new_for_bytes(self.BLOCKS_MIME, GLib.Bytes.new(data)),
+            Gdk.ContentProvider.new_for_value(text)]))
+        if cut and self.view.get_editable():
+            self.checkpoint()
+            buf.delete_selection(True, True)
+            self.changed()
+
     def on_paste(self, view):
         cb = self.view.get_clipboard()
         fmts = cb.get_formats()
+        if fmts.contain_mime_type(self.BLOCKS_MIME):
+            view.stop_emission_by_name("paste-clipboard")
+            chunks = []
+
+            def more(stream, res):
+                try:
+                    g = stream.read_bytes_finish(res)
+                except GLib.Error:
+                    return
+                if g.get_size():
+                    chunks.append(g.get_data())
+                    stream.read_bytes_async(1 << 20, GLib.PRIORITY_DEFAULT, None, more)
+                    return
+                stream.close_async(GLib.PRIORITY_DEFAULT, None, None)
+                try:
+                    blocks = json.loads(b"".join(chunks).decode())
+                except ValueError:
+                    return
+                self.insert_blocks(blocks)
+
+            def opened(c, res):
+                try:
+                    stream, _mime = c.read_finish(res)
+                except GLib.Error:
+                    return
+                stream.read_bytes_async(1 << 20, GLib.PRIORITY_DEFAULT, None, more)
+            cb.read_async([self.BLOCKS_MIME], GLib.PRIORITY_DEFAULT, None, opened)
+            return
         if fmts.contain_gtype(GObject.TYPE_STRING) and self.settings.get("markdown", True):
             view.stop_emission_by_name("paste-clipboard")
 
@@ -3503,6 +3852,15 @@ class Writer(Gtk.Box):
             dlg.open(self.win, None, done)
 
     def on_click(self, gesture, n, x, y):
+        if self.painter:
+            GLib.idle_add(lambda: (self.paint_format(), False)[1])
+        elif n == 1 and not self.buf.get_has_selection():
+            def maybe_comment():
+                cid = self.comment_at(self.buf.get_iter_at_mark(self.buf.get_insert()))
+                if cid and (self.cm_pop is None or not self.cm_pop.get_visible()):
+                    self.open_comment(cid)
+                return False
+            GLib.idle_add(maybe_comment)
         state = gesture.get_current_event_state()
         if n == 1 and not state & (Gdk.ModifierType.CONTROL_MASK | Gdk.ModifierType.SHIFT_MASK) and self.editable:
             it = self.image_at(x, y)
@@ -3530,8 +3888,18 @@ class Writer(Gtk.Box):
         self.run_search()
 
     def toggle_find(self):
-        """Strg+F: Suchleiste öffnen bzw. – wenn sie schon offen ist – schließen."""
-        self.hide_find() if self.findrev.get_reveal_child() else self.show_find()
+        """Strg+F: öffnen · bei offener Leiste und Fokus im Text zurück ins Suchfeld (alles markiert) ·
+        mit Fokus in der Leiste schließen."""
+        if not self.findrev.get_reveal_child():
+            self.show_find()
+            return
+        root = self.findrev.get_root()
+        f = root.get_focus() if root else None
+        if f is not None and (f is self.findrev or f.is_ancestor(self.findrev)):
+            self.hide_find()
+        else:
+            self.find_entry.grab_focus()
+            self.find_entry.select_region(0, -1)
 
     def hide_find(self):
         self.findrev.set_reveal_child(False)
@@ -3653,6 +4021,12 @@ class Writer(Gtk.Box):
         shift = bool(state & Gdk.ModifierType.SHIFT_MASK)
         alt = bool(state & Gdk.ModifierType.ALT_MASK)
         k = Gdk.keyval_to_lower(keyval)
+        if ctrl_on and alt and k == Gdk.KEY_m:
+            self.new_comment()
+            return True
+        if ctrl_on and shift and not alt and k == Gdk.KEY_e:
+            self.set_track(not self.page.get("track"))
+            return True
         if ctrl_on and not alt:
             acts = {
                 Gdk.KEY_z: (self.redo if shift else self.undo), Gdk.KEY_y: self.redo,
@@ -3829,6 +4203,7 @@ class Writer(Gtk.Box):
     def invalidate(self):
         """Seiten neu berechnen, sobald GTK das Layout fertig hat."""
         self._numbers = None
+        self._lnum_cache = None
         if self._pages_id is None:
             self._pages_id = GLib.timeout_add(120, self.compute_pages)
         self.view.queue_draw()
@@ -4001,11 +4376,12 @@ class Writer(Gtk.Box):
         if "body_h" not in g:
             return
         n = max(1, len(self.pages))
-        paper = rgba("#fbfaf6") if self.light else self.paper_color
+        pc = self.page.get("page_color")
+        paper = rgba(pc) if pc else rgba("#fbfaf6") if self.light else self.paper_color
         vis = self.view.get_visible_rect()
         _, top_y = self.view.window_to_buffer_coords(Gtk.TextWindowType.WIDGET, 0, 0)
         lo, hi = top_y - g["page_h"], top_y + self.view.get_height() + g["page_h"]
-        dim = rgba("#000000", 0.45) if self.light else rgba(self.fg_hex, 0.5)
+        dim = rgba("#000000", 0.45) if self.paper_light else rgba(self.fg_hex, 0.5)
         for i in range(n):
             y0 = self.content_start(i) - g["mt"]
             if y0 > hi or y0 + g["page_h"] < lo:
@@ -4014,7 +4390,82 @@ class Writer(Gtk.Box):
                 snap.append_color(rgba("#000000", a), Graphene.Rect().init(g["side"] - d, y0 - d + 2, g["page_w"] + 2 * d,
                                                                            g["page_h"] + 2 * d))
             snap.append_color(paper, Graphene.Rect().init(g["side"], y0, g["page_w"], g["page_h"]))
+            self.draw_background(snap, y0, dim)
             self.draw_decor(snap, i, n, y0, dim)
+
+    def display_lines(self):
+        """[(y, höhe, ohne_nummer)] aller Anzeigezeilen in Pufferkoordinaten; gemerkt, bis sich Text/Größe ändern."""
+        key = (self.view.get_width(), self.view.get_height(), round(self.zoom, 3))
+        c = getattr(self, "_lnum_cache", None)
+        if c and c[0] == key:
+            return c[1]
+        out, it, last = [], self.buf.get_start_iter(), -1
+        while it.get_offset() != last:
+            last = it.get_offset()
+            r = self.view.get_iter_location(it)
+            out.append((r.y, r.height, it.get_child_anchor() is not None or it.get_paintable() is not None))
+            if not self.view.forward_display_line(it):
+                break
+        self._lnum_cache = (key, out)
+        return out
+
+    def draw_linenumbers(self, snap):
+        """Zeilennummern am linken Seitenrand (Seite → Zeilennummern)."""
+        p, g = self.page, self.geo
+        if p.get("lnum", "off") == "off" or "body_h" not in g:
+            return
+        step = int(p.get("lnum_step", 1))
+        per_page = p["lnum"] == "page"
+        _, top_y = self.view.window_to_buffer_coords(Gtk.TextWindowType.WIDGET, 0, 0)
+        bot_y = top_y + self.view.get_height()
+        starts = list(self.pages) or [0]
+        color = rgba("#000000", 0.45) if self.paper_light else rgba(self.fg_hex, 0.5)
+        fd = Pango.FontDescription.from_string(f"{df.BASE_FONT} {max(5.0, 7.5 * g['k']):.1f}")
+        x_right = g["side"] + g["ml"] - 8 * g["k"]
+        n, page_idx = 0, 0
+        for y, h, skip in self.display_lines():
+            if skip:
+                continue
+            while page_idx + 1 < len(starts) and y >= starts[page_idx + 1] - 1:
+                page_idx += 1
+                if per_page:
+                    n = 0
+            n += 1
+            if y > bot_y:
+                break
+            if y + h < top_y or n % step:
+                continue
+            lay = self.view.create_pango_layout(str(n))
+            lay.set_font_description(fd)
+            w, lh = lay.get_pixel_size()
+            snap.save()
+            snap.translate(Graphene.Point().init(x_right - w, y + max(0, h - lh) / 2))
+            snap.append_layout(lay, color)
+            snap.restore()
+
+    def draw_background(self, snap, y0, dim):
+        """Wasserzeichen (schräg, blass) und Seitenrahmen."""
+        g, p = self.geo, self.page
+        wm = p.get("watermark", "")
+        if wm:
+            lay = self.view.create_pango_layout(wm)
+            size = max(10.0, 72 * g["k"] * g.get("scale", 1.0))
+            lay.set_font_description(Pango.FontDescription.from_string(f"{df.BASE_FONT} Bold {size:.1f}"))
+            w, h = lay.get_pixel_size()
+            fit = min(1.0, (g["page_w"] * 0.9) / max(1, w * 0.72))
+            snap.save()
+            snap.translate(Graphene.Point().init(g["side"] + g["page_w"] / 2, y0 + g["page_h"] / 2))
+            snap.rotate(-45)
+            snap.scale(fit, fit)
+            snap.translate(Graphene.Point().init(-w / 2, -h / 2))
+            snap.append_layout(lay, rgba("#808080", 0.22))
+            snap.restore()
+        if p.get("border"):
+            m, t = 28 * g["k"], max(1.0, 1.2 * g["k"])
+            x, y, w, h = g["side"] + m, y0 + m, g["page_w"] - 2 * m, g["page_h"] - 2 * m
+            c = rgba("#404040", 0.9)
+            for r in ((x, y, w, t), (x, y + h - t, w, t), (x, y, t, h), (x + w - t, y, t, h)):
+                snap.append_color(c, Graphene.Rect().init(*r))
 
     def decor_texts(self, i, n):
         """(kopf, fuß, nummer, nummer_position) für Seite i (0-basiert)."""
@@ -4064,9 +4515,11 @@ class Writer(Gtk.Box):
         """Aufzählungszeichen und Nummern vor Listenabsätzen (+ Hinweise der Ansicht „fließend“)."""
         if self.flow:
             self.flowx.draw(snap)
+        else:
+            self.draw_linenumbers(snap)
         tags = [self.buf.get_tag_table().lookup("pl:bullet"), self.buf.get_tag_table().lookup("pl:number")]
         nums = None
-        color = rgba("#1d1d1d") if (self.light and not self.flow) else rgba(self.fg_hex)
+        color = rgba("#1d1d1d") if (self.paper_light and not self.flow) else rgba(self.fg_hex)
         for tag in tags:
             it = self.buf.get_start_iter()
             while True:
@@ -4112,8 +4565,13 @@ class Writer(Gtk.Box):
                 if it.is_end():
                     break
 
+    @property
+    def paper_light(self):
+        """Helles Papier: Schalter oder eine eigene Seitenfarbe (dann dunkle Schrift)."""
+        return bool(self.light or self.page.get("page_color"))
+
     def apply_paper(self):
-        light = self.light and not self.flow          # fließend: immer in den App-Farben
+        light = self.paper_light and not self.flow          # fließend: immer in den App-Farben
         (self.view.add_css_class if light else self.view.remove_css_class)("light")
         (self.scroll.add_css_class if light else self.scroll.remove_css_class)("light")
         self.refresh_colors()
@@ -4125,7 +4583,12 @@ class Writer(Gtk.Box):
         self.paper_color = c if ok else rgba("#271e19")
         ok, f = ctx.lookup_color("foreground")
         self.fg_hex = f.to_string() if ok else "#f0dfd7"
-        self.quote_fg.props.foreground_rgba = rgba("#555555") if self.light else rgba(self.fg_hex, 0.7)
+        self.quote_fg.props.foreground_rgba = rgba("#555555") if self.paper_light else rgba(self.fg_hex, 0.7)
+        ok, pc = ctx.lookup_color("primary")
+        self.link_rgba = rgba("#4a8fe7") if (self.paper_light and not self.flow) or not ok else pc
+        if getattr(self, "buf", None) is not None:
+            self.buf.get_tag_table().foreach(lambda t: t.props.name and t.props.name.startswith("link:") and
+                                             setattr(t.props, "foreground_rgba", self.link_rgba))
         self.view.queue_draw()
 
     def on_paper_toggle(self, btn):

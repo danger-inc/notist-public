@@ -86,6 +86,8 @@ class FlowMode:
         w.view.add_controller(click)
         w.buf.connect_after("changed", lambda *_: self.on_changed())
         w.buf.connect_after("mark-set", self.on_mark)
+        w.scroll.get_vadjustment().connect("value-changed", self.on_scroll)
+        self._scroll_id = None
 
     # ================= Geometrie / Zeichnen =================
     def geometry(self, width):
@@ -434,6 +436,20 @@ class FlowMode:
         elif self.slash_line is not None and buf.get_iter_at_mark(buf.get_insert()).get_line() != self.slash_line:
             self.close_slash()
         self.w.view.queue_draw()
+
+    def on_scroll(self, adj):
+        """Markierungs-Leiste und Blockmenü bleiben beim Scrollen am Text hängen (statt am Bildschirm)."""
+        if self._scroll_id is None and (self.bubble.get_visible() or self.slash.get_visible() or
+                                        (self.w.flow and self.w.buf.get_has_selection())):
+            self._scroll_id = GLib.idle_add(self._follow_scroll)
+
+    def _follow_scroll(self):
+        self._scroll_id = None
+        if self.bubble.get_visible() or self.w.buf.get_has_selection():
+            self.update_bubble()
+        if self.slash.get_visible() and (self.slash_mark is not None or self.slash_line is not None):
+            self.place(self.slash)
+        return False
 
     def update_bubble(self):
         self._bubble_id = None

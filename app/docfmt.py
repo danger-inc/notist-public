@@ -20,7 +20,7 @@ STYLE_FMT = {"normal": (11, False, False), "title": (26, True, False), "h1": (20
              "h2": (16, True, False), "h3": (13, True, False), "quote": (11, False, True), "code": (10, False, False)}
 BASE_FONT = "Noto Sans"
 MONO_FONT = "Noto Sans Mono"
-RUN_KEYS = ("b", "i", "u", "s", "va", "font", "size", "color", "hl", "link")
+RUN_KEYS = ("b", "i", "u", "s", "va", "font", "size", "color", "hl", "link", "cm", "tc")   # cm: Kommentar-Id, tc: ins|del
 
 
 # ---------------------------------------------------------------- Seite
@@ -35,13 +35,29 @@ MARGIN_PRESETS = {"Normal": (25, 25, 25, 25), "Schmal": (12.7, 12.7, 12.7, 12.7)
 def page_defaults(margin_mm=25.0):
     m = float(margin_mm)
     return {"size": "A4", "orient": "portrait", "margins": [m, m, m, m], "header": "", "footer": "",
-            "numbers": "none", "num_fmt": "n", "num_from": 1}
+            "numbers": "none", "num_fmt": "n", "num_from": 1,
+            "lnum": "off", "lnum_step": 1,            # Zeilennummern: off | continuous | page (je Seite neu)
+            "watermark": "", "page_color": "", "border": False,
+            "comments": {}, "author": "", "track": False}               # comments: {id: {text, author, time}}
 
 
 def norm_page(p, margin_mm=25.0):
     out = page_defaults(margin_mm)
     if isinstance(p, dict):
         out.update({k: v for k, v in p.items() if k in out})
+    if out["lnum"] not in ("off", "continuous", "page"):
+        out["lnum"] = "off"
+    try:
+        out["lnum_step"] = max(1, min(99, int(out["lnum_step"])))
+    except (TypeError, ValueError):
+        out["lnum_step"] = 1
+    out["watermark"] = str(out["watermark"] or "")[:60]
+    out["page_color"] = out["page_color"] if re.fullmatch(r"#[0-9a-fA-F]{6}", str(out["page_color"] or "")) else ""
+    out["border"] = bool(out["border"])
+    cm = out["comments"] if isinstance(out["comments"], dict) else {}
+    out["comments"] = {str(k): v for k, v in cm.items() if isinstance(v, dict)}
+    out["author"] = str(out["author"] or "")[:60]
+    out["track"] = bool(out["track"])
     if out["size"] not in PAGE_SIZES:
         out["size"] = "A4"
     m = list(out["margins"])[:4] + [25.0] * max(0, 4 - len(out["margins"]))
@@ -126,6 +142,20 @@ def merge_runs(runs):
             out[-1]["text"] += r["text"]
         else:
             out.append(dict(r))
+    return out
+
+
+def accept_all(blocks):
+    """Alle nachverfolgten Änderungen annehmen (Gelöschtes weg) und Kommentar-Marken entfernen – für Ausgabeformate."""
+    if not any(r.get("tc") or r.get("cm") for b in blocks if b["t"] == "p" for r in b["runs"]):
+        return blocks
+    out = []
+    for b in blocks:
+        if b["t"] != "p":
+            out.append(b)
+            continue
+        runs = [{k: v for k, v in r.items() if k not in ("cm", "tc")} for r in b["runs"] if r.get("tc") != "del"]
+        out.append({**b, "runs": merge_runs(runs)})
     return out
 
 
@@ -233,6 +263,11 @@ def _rpr(r):
     return f"<w:rPr>{''.join(x)}</w:rPr>" if x else ""
 
 
+def _now_iso():
+    import datetime
+    return datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
 def _text_runs(text, rpr):
     out = []
     for j, part in enumerate(text.split("\t")):
@@ -327,6 +362,10 @@ class _DocxWriter:
         self.footnotes = []   # Texte, Id = Position + 1
         self.toc_pages = {}   # block-index → Seite (aus render.py)
         self.blocks = []
+        self.comments = {}    # id → {text, author, time}
+        self.cm_used = []     # Kommentar-Ids in der Reihenfolge ihres Auftretens (Index = w:id)
+        self.author = "notist"
+        self.tc_n = 0
 
     def rel(self, typ, target, external=False):
         rid = f"rId{len(self.rels) + 10}"
@@ -372,7 +411,24 @@ class _DocxWriter:
         body = []
         if b.get("_bm") is not None:
             body.append(f'<w:bookmarkStart w:id="{b["_bm"]}" w:name="_Toc{b["_bm"]}"/><w:bookmarkEnd w:id="{b["_bm"]}"/>')
+        open_cm = None
+
+        def close_cm():
+            nonlocal open_cm
+            if open_cm is not None:
+                n = self.cm_used.index(open_cm)
+                body.append(f'<w:commentRangeEnd w:id="{n}"/><w:r><w:commentReference w:id="{n}"/></w:r>')
+                open_cm = None
+        stamp = _now_iso()
         for r in b["runs"]:
+            cm = r.get("cm") if r.get("cm") in self.comments else None
+            if cm != open_cm:
+                close_cm()
+                if cm:
+                    if cm not in self.cm_used:
+                        self.cm_used.append(cm)
+                    body.append(f'<w:commentRangeStart w:id="{self.cm_used.index(cm)}"/>')
+                    open_cm = cm
             if r.get("img"):
                 body.append(self.image(r))
                 continue
@@ -386,7 +442,14 @@ class _DocxWriter:
             if r.get("link"):
                 rid = self.rel("hyperlink", r["link"], external=True)
                 txt = f'<w:hyperlink r:id="{rid}" w:history="1">{txt}</w:hyperlink>'
+            if r.get("tc") in ("ins", "del"):
+                self.tc_n += 1
+                if r["tc"] == "del":
+                    txt = txt.replace("<w:t ", "<w:delText ").replace("</w:t>", "</w:delText>")
+                tag = r["tc"]
+                txt = f'<w:{tag} w:id="{900 + self.tc_n}" w:author="{esc(self.author)}" w:date="{stamp}">{txt}</w:{tag}>'
             body.append(txt)
+        close_cm()
         return f"<w:p><w:pPr>{''.join(ppr)}</w:pPr>{''.join(body)}</w:p>"
 
     def table(self, b):
@@ -472,6 +535,20 @@ class _DocxWriter:
                        f'<w:r><w:t>{page}</w:t></w:r></w:hyperlink></w:p>')
         out.append('<w:p><w:r><w:fldChar w:fldCharType="end"/></w:r></w:p>')
         return "".join(out)
+
+    def comments_xml(self):
+        out = []
+        for n, cid in enumerate(self.cm_used):
+            c = self.comments[cid]
+            author = c.get("author") or self.author
+            paras = "".join(f'<w:p><w:r><w:t xml:space="preserve">{esc(line)}</w:t></w:r></w:p>'
+                            for line in (c.get("text") or "").split("\n"))
+            date = c.get("time") or _now_iso()
+            date = date[:19] + "Z" if len(date) >= 19 else date
+            out.append(f'<w:comment w:id="{n}" w:author="{esc(author)}" w:date="{esc(date)}" '
+                       f'w:initials="{esc(author[:2].upper())}">{paras}</w:comment>')
+        return (f'<?xml version="1.0" encoding="UTF-8" standalone="yes"?><w:comments xmlns:w="{W}" xmlns:r="{R}">'
+                + "".join(out) + "</w:comments>")
 
     def footnotes_xml(self):
         notes = ['<w:footnote w:type="separator" w:id="-1"><w:p><w:pPr><w:spacing w:after="0" w:line="240" '
@@ -596,6 +673,8 @@ def write_docx(blocks, path, title="", page=None):
         except Exception:  # noqa: BLE001 – ohne Seitenzahlen geht es auch
             w.toc_pages = {}
     w.blocks = blocks
+    w.comments = cfg.get("comments") or {}
+    w.author = cfg.get("author") or "notist"
     body = w.body(blocks)
     tw = 1440 / 25.4
     pw, ph, (mt, mr, mb, ml) = page_mm(cfg)
@@ -625,15 +704,26 @@ def write_docx(blocks, path, title="", page=None):
         rid = w.rel("header" if kind == "hdr" else "footer", name)
         typ = "first" if name.endswith("2.xml") else "default"
         refs += f'<w:{"headerReference" if kind == "hdr" else "footerReference"} w:type="{typ}" r:id="{rid}"/>'
+    borders = ""
+    if cfg.get("border"):
+        borders = ('<w:pgBorders w:offsetFrom="page">' + "".join(
+            f'<w:{side} w:val="single" w:sz="8" w:space="24" w:color="404040"/>' for side in ("top", "left", "bottom", "right")) +
+            '</w:pgBorders>')
+    lnum = ""
+    if cfg.get("lnum", "off") != "off":
+        lnum = (f'<w:lnNumType w:countBy="{int(cfg["lnum_step"])}" '
+                f'w:restart="{"newPage" if cfg["lnum"] == "page" else "continuous"}"/>')
     sect = (f'<w:sectPr>{refs}<w:pgSz w:w="{round(pw * tw)}" w:h="{round(ph * tw)}"{orient}/><w:pgMar w:top="{round(mt * tw)}" '
             f'w:right="{round(mr * tw)}" w:bottom="{round(mb * tw)}" w:left="{round(ml * tw)}" w:header="708" w:footer="708" '
-            f'w:gutter="0"/>{"<w:titlePg/>" if title_pg else ""}</w:sectPr>')
+            f'w:gutter="0"/>{borders}{lnum}{"<w:titlePg/>" if title_pg else ""}</w:sectPr>')
     doc = (f'<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
            f'<w:document xmlns:w="{W}" xmlns:r="{R}" xmlns:wp="{WP}" xmlns:a="{A}" xmlns:pic="{PIC}">'
            f'<w:body>{body}{sect}</w:body></w:document>')
     rels = ['<Relationship Id="rId1" Type="' + REL_T + 'styles" Target="styles.xml"/>',
             '<Relationship Id="rId2" Type="' + REL_T + 'numbering" Target="numbering.xml"/>',
             '<Relationship Id="rId3" Type="' + REL_T + 'footnotes" Target="footnotes.xml"/>']
+    if w.cm_used:
+        rels.append('<Relationship Id="rId4" Type="' + REL_T + 'comments" Target="comments.xml"/>')
     for rid, typ, target, ext in w.rels:
         mode = ' TargetMode="External"' if ext else ""
         rels.append(f'<Relationship Id="{rid}" Type="{REL_T}{typ}" Target="{esc(target)}"{mode}/>')
@@ -649,6 +739,8 @@ def write_docx(blocks, path, title="", page=None):
               '<Override PartName="/word/numbering.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.numbering+xml"/>'
               '<Override PartName="/docProps/core.xml" ContentType="application/vnd.openxmlformats-package.core-properties+xml"/>'
               '<Override PartName="/word/footnotes.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.footnotes+xml"/>'
+              + ('<Override PartName="/word/comments.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.comments+xml"/>'
+                 if w.cm_used else "")
               + "".join(f'<Override PartName="/word/{name}" ContentType="application/vnd.openxmlformats-officedocument.'
                         f'wordprocessingml.{"header" if kind == "hdr" else "footer"}+xml"/>' for kind, name, _ in hf)
               + '</Types>')
@@ -669,6 +761,8 @@ def write_docx(blocks, path, title="", page=None):
         z.writestr("word/styles.xml", _styles_xml())
         z.writestr("word/numbering.xml", _numbering_xml(w.nums))
         z.writestr("word/footnotes.xml", w.footnotes_xml())
+        if w.cm_used:
+            z.writestr("word/comments.xml", w.comments_xml())
         for kind, name, xml in hf:
             z.writestr(f"word/{name}", xml)
         z.writestr("word/_rels/document.xml.rels",
@@ -712,10 +806,22 @@ class _DocxReader:
                     continue
                 self.footnotes[f.get(_q("id"))] = " ".join("".join(t.text or "" for t in p.iter(_q("t"))).strip()
                                                            for p in f.iter(_q("p"))).strip()
+        # Kommentare: Word-Id → eigene Id (die Einträge landen in page["comments"])
+        self.comments, self.cm_map, self._cm_active, self._tc, self._cm_seen = {}, {}, [], None, set()
+        cm = self._xml("word/comments.xml")
+        if cm is not None:
+            import uuid
+            for c in cm.findall(_q("comment")):
+                wid = c.get(_q("id"))
+                cid = self.cm_map[wid] = str(uuid.uuid4())
+                text = "\n".join("".join(t.text or "" for t in p.iter(_q("t"))) for p in c.findall(_q("p")))
+                self.comments[cid] = {"text": text.strip(), "author": c.get(_q("author"), ""),
+                                      "time": (c.get(_q("date")) or "")[:19]}
 
     def page(self, body):
         """Seiteneinstellungen aus dem letzten sectPr (Format, Ränder, Kopf-/Fußzeile, Seitenzahl)."""
         pg = page_defaults()
+        pg["comments"] = {k: v for k, v in self.comments.items() if k in self._cm_seen}
         sect = body.find(_q("sectPr")) if body is not None else None
         if sect is None:
             return pg
@@ -736,6 +842,14 @@ class _DocxReader:
                 pg["margins"] = [round(abs(int(mar.get(_q(k)))) * tw, 1) for k in ("top", "right", "bottom", "left")]
             except (TypeError, ValueError):
                 pass
+        ln = sect.find(_q("lnNumType"))
+        if ln is not None:
+            pg["lnum"] = "page" if ln.get(_q("restart")) == "newPage" else "continuous"
+            try:
+                pg["lnum_step"] = max(1, int(ln.get(_q("countBy"), "1")))
+            except ValueError:
+                pass
+        pg["border"] = sect.find(_q("pgBorders")) is not None
         first_diff = sect.find(_q("titlePg")) is not None and _on(sect.find(_q("titlePg")))
         for ref_tag, key in (("headerReference", "header"), ("footerReference", "footer")):
             for ref in sect.findall(_q(ref_tag)):
@@ -917,6 +1031,10 @@ class _DocxReader:
                     st = self.styles.get(_val(rs.find(_q("rStyle"))))
                     if st:
                         props = self.run_props(rs, self.run_props(st[2], base))
+                if self._cm_active:
+                    props["cm"] = self._cm_active[-1]
+                if self._tc:
+                    props["tc"] = self._tc
                 if link:
                     props["link"] = link
                     if props.get("color") == "#0563c1":   # Standard-Linkfarbe nicht als eigene Farbe merken
@@ -924,7 +1042,7 @@ class _DocxReader:
                     props.pop("u", None)                  # Links sind ohnehin unterstrichen
                 for x in c:
                     xt = x.tag.split("}")[-1]
-                    if xt == "t":
+                    if xt in ("t", "delText"):
                         out.append({**props, "text": x.text or ""})
                     elif xt == "tab":
                         out.append({**props, "text": "\t"})
@@ -947,7 +1065,20 @@ class _DocxReader:
                 rid = c.get(_q("id", R))
                 url = self.rels.get(rid, (None,))[0] if rid else None
                 self.runs_of(c, base, url or link, out)
-            elif tag in ("ins", "smartTag", "fldSimple", "sdt", "sdtContent", "customXml", "moveTo"):
+            elif tag == "commentRangeStart":
+                cid = self.cm_map.get(c.get(_q("id")))
+                if cid:
+                    self._cm_active.append(cid)
+                    self._cm_seen.add(cid)
+            elif tag == "commentRangeEnd":
+                cid = self.cm_map.get(c.get(_q("id")))
+                if cid in self._cm_active:
+                    self._cm_active.remove(cid)
+            elif tag in ("ins", "del"):
+                old, self._tc = self._tc, tag
+                self.runs_of(c, base, link, out)
+                self._tc = old
+            elif tag in ("smartTag", "fldSimple", "sdt", "sdtContent", "customXml", "moveTo"):
                 self.runs_of(c, base, link, out)
         return out
 
@@ -1340,6 +1471,7 @@ def _slug(text):
 
 
 def to_markdown(blocks):
+    blocks = accept_all(blocks)
     nums = list_numbers(blocks)
     out, kinds, notes = [], [], []
     for i, b in enumerate(blocks):
@@ -1412,6 +1544,7 @@ def to_markdown(blocks):
 
 
 def to_html(blocks, title=""):
+    blocks = accept_all(blocks)
     nums = list_numbers(blocks)
     out = [f"<!doctype html><html lang=\"de\"><head><meta charset=\"utf-8\"><title>{esc(title)}</title>"
            f"<style>body{{font-family:'{BASE_FONT}',sans-serif;max-width:46em;margin:3em auto;line-height:1.4}}"
@@ -1580,6 +1713,7 @@ def import_file(path):
 
 
 def export_text(blocks):
+    blocks = accept_all(blocks)
     nums = list_numbers(blocks)
     out, notes = [], []
     for i, b in enumerate(blocks):

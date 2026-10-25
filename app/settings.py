@@ -524,6 +524,12 @@ class SettingsWindow(Gtk.Window):
                   f"Keine Wörterbücher gefunden. Installieren mit: {spell.INSTALL_HINT}")
         box.append(row("Rechtschreibprüfung", "In Notizen und Words (LaTeX: siehe dort)",
                        switch(self.prefs, "spell", True, lambda on: self.app.set_spell(on))))
+        box.append(row("Standardsprache neuer Dokumente",
+                       "Jedes Dokument hat unten in der Leiste seinen DE/EN-Knopf: Rechtschreibung und Anführungszeichen "
+                       "(„…“ oder “…”) richten sich danach",
+                       dropdown([("de", "Deutsch"), ("en", "English")], self.app.default_lang(),
+                                lambda v: (self.prefs.__setitem__("doc_lang", v), self.app.save_prefs(),
+                                           self.app.apply_doc_lang()))))
         have = spell.installed_langs()
 
         def lang_cb(code):

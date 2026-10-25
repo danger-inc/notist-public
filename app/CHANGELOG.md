@@ -1,5 +1,55 @@
 # notist – Änderungen
 
+## 4.14.2 (2026-10-25)
+- **Windows**: Speichern brach bei Zeichen wie „☑“ oder manchen Umlauten mit einem Zeichensatz-Fehler ab; Textdateien
+  werden dort jetzt immer als UTF-8 gelesen und geschrieben.
+- **Windows**: Der Glas-Schalter funktioniert wieder.
+
+## 4.14.1 (2026-10-25)
+- **Update-Knopf**: Neben der Versionsnummer steht „󰑐“ – Klick sucht sofort nach einem Update. Gibt es eine neuere
+  Version, wird daraus „󰚰 update“; ein Klick lädt und installiert sie (Linux und Windows), danach heißt er „󰑓 neu starten“.
+- **Rückmeldung bei Umschalt-Knöpfen**: „An“ (z. B. „Ton behalten“) ist jetzt auch unter dem Mauszeiger zu sehen,
+  Drücken färbt sofort – man muss die Maus nicht mehr wegbewegen, um zu sehen, ob der Klick angekommen ist.
+- **2 Finger auch vorwärts**: Nach einem Zurück-Wischen bringt das Wischen in die andere Richtung zur verlassenen
+  Seite zurück.
+
+## 4.14.0 (2026-10-25)
+- **Words: mehr Funktionen im Menüband** – neuer Reiter **Überprüfen** (Kommentare, Änderungen verfolgen, Sprache,
+  Wörter zählen). Layout hat jetzt **Zeilennummern** (fortlaufend oder je Seite neu, jede n-te Zeile), **Wasserzeichen**,
+  **Seitenfarbe** und **Seitenrahmen** – sichtbar in der Seitenansicht, im PDF und beim Drucken (Zeilennummern und
+  Rahmen auch in DOCX). Start: **Aa** ändert die Groß-/Kleinschreibung, **󰃣 Format übertragen** kopiert Schrift- und
+  Absatzformat auf anderen Text.
+- **Kommentare** (Strg+Alt+M) an markiertem Text: Klick auf die gelbe Stelle öffnet den Kommentar, „Alle“ listet sie;
+  **Änderungen verfolgen** (Strg+Umschalt+E): Eingefügtes grün, Gelöschtes rot durchgestrichen, annehmen/ablehnen einzeln
+  oder alle. Beides wird in DOCX gelesen und geschrieben; die anderen Ausgabeformate zeigen den angenommenen Text.
+- **Sprache je Dokument** (Notizen, Words, LaTeX): Knopf **DE/EN** unten in der Leiste. Er steuert Rechtschreibung und
+  Anführungszeichen („…“ oder “…”); die Standardsprache für neue Dokumente steht in den Einstellungen.
+- **Teilen → Als Datei speichern** mit vielen Formaten: PDF, TXT, DOCX, Markdown, Webseite (angeheftet, Rechtsklick heftet
+  an/löst) und darunter ODT, RTF, E-Book (EPUB); bei LaTeX auch .tex und das ganze Projekt als ZIP.
+- **LaTeX-Pakete**: neuer Paket-Manager (Knopf 󰏗 / Datei → LaTeX-Pakete): suchen, vorab herunterladen (danach offline),
+  Speicherordner öffnen. Die Befehle benutzter und geladener Pakete (z. B. `\linenumbers` aus lineno) kommen
+  automatisch in Vorschläge und Befehlsübersicht; „nach befehlen suchen“ liest alle geladenen Pakete ein.
+- **LaTeX: Enter übernimmt den markierten Vorschlag** nach `\` (auch per Maus-Hover), statt eine neue Zeile zu beginnen.
+- **Strg+F in drei Stufen**: öffnen · erneut (Cursor im Text) springt ins Suchfeld und markiert es · nochmal schließt.
+  Neues Aussehen wie die Suche in Code-Editoren (Karte oben rechts), in Notizen, Words und LaTeX.
+- **Neuer Look**: Notizliste wie die Dateiliste in filist (flache Zeilen, Pfadleiste darüber), die obere Werkzeugleiste
+  in Notizen, Words-Fließend und LaTeX ebenfalls. **Rechtsklick** auf einen Eintrag öffnet dasselbe Menü wie „Mehr“
+  (Anheften, Öffnen oben).
+- **Behoben**: Words-Fließend springt beim Wechsel Notizen ↔ Words (Alt+1/Alt+2) wieder an die letzte Stelle; Kopieren
+  und Einfügen innerhalb von notist behält Überschriften, Listen und Links; die Format-Leiste bei Markierung bleibt beim
+  Scrollen am Text; „übersetzer“ sitzt auf einer Linie mit den anderen Knöpfen; Kästchen (☐) und Links wechseln die
+  Farbe mit dem Hintergrundbild; kleine weiße Punkte beim Scrollen (Cursor-Griffe) sind aus, außer bei echter Touch-Bedienung.
+- **Installation**: notist legt vor jedem Installieren/Aktualisieren eine ZIP-Sicherung der Daten an
+  (`~/.local/share/notes/backups/vor-installation-…zip`); Einstellungen werden atomar geschrieben, eine beschädigte
+  Einstellungsdatei wird gesichert statt überschrieben.
+
+## 4.13.0 (2026-10-25)
+- **Tabs statt Dropdown**: oben in der Mitte stehen jetzt die geöffneten Einträge als Tabs im -ist-Look (wie bei filist):
+  ¹²³-Nummern, ✕ zum Schließen (auch Mittelklick/Strg+W), „+“ für neu, Strg+Bild↑/↓ wechselt. Der letzte Tab
+  führt zurück auf Home. Die Liste mit Suche (Words, LaTeX, schmales Fenster) öffnet der ≡-Knopf rechts davon (Strg+T).
+- **Keine Suchleiste mehr oben**: Strg+F sucht im Eintrag, auf Home (Alt+0) gibt es die Suchleiste über alle Bereiche.
+  Die Listensuche („in allen …“, Strg+Umschalt+F) erscheint nur bei Bedarf oben in der Seitenleiste.
+
 ## 4.12.0 (2026-10-24)
 - **Hover-Übersetzer von linguist**: Ist er in linguist eingeschaltet, zeigt der Knopf „übersetzer ◢“ unten rechts,
   ob er an ist – Klick schaltet ihn an/aus, Rechtsklick öffnet die linguist-Einstellungen, Strg+Umschalt+T zeigt

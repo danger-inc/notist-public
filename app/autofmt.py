@@ -250,7 +250,11 @@ def after_type(buf, loc, text, prefs, skip=None):
     job = None
     if typo and text == '"':
         prev = before[-2] if len(before) >= 2 else " "
-        job = (1, "„" if prev.isspace() or prev in "([{–—/„￼" else "“")
+        opening = prev.isspace() or prev in "([{–—/„“￼"
+        if getattr(buf, "lang", "de") == "en":
+            job = (1, "“" if opening else "”")
+        else:
+            job = (1, "„" if opening else "“")
     elif typo:
         for a, b in PAIRS:
             if before.endswith(a) and not before.endswith(a + a[-1]):

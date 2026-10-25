@@ -68,6 +68,7 @@ class Paginator:
         self.fn_h = 0.0
         self.toc_pages = toc_pages    # {block-index: seite} aus dem ersten Durchlauf
         self.head_pages = {}          # block-index → seite (für das Inhaltsverzeichnis)
+        self.lno = 0                  # Zeilennummer (Seitenrand), wenn eingeschaltet
 
     # ----- Hilfen -----
     @property
@@ -82,6 +83,8 @@ class Paginator:
         self.flush_footnotes()
         self.pages.append([])
         self.y = self.mt
+        if self.page_cfg.get("lnum") == "page":
+            self.lno = 0
 
     def flush_footnotes(self):
         if not self.fn_page:
@@ -161,6 +164,10 @@ class Paginator:
             if first and marker:
                 self.op("text", marker, x - LIST_STEP + 2, start_y + baseline - origin, lay)
             self.op("line", line, x + log.x / Pango.SCALE, start_y + baseline - origin, color, lay)
+            if self.page_cfg.get("lnum", "off") != "off":
+                self.lno += 1
+                if self.lno % int(self.page_cfg.get("lnum_step", 1)) == 0:
+                    self.op("lnum", str(self.lno), self.ml - 10, start_y + baseline - origin)
             self.y = ly + h
             first = False
             if not it.next_line():
@@ -335,6 +342,16 @@ class Paginator:
         cfg, total = self.page_cfg, len(self.pages)
         for i, ops in enumerate(self.pages):
             n = i + 1
+            under = []                      # Hintergrund, Wasserzeichen: unter den Text
+            if cfg.get("page_color"):
+                c = cfg["page_color"].lstrip("#")
+                under.append(("pagebg", tuple(int(c[k:k + 2], 16) / 255 for k in (0, 2, 4)), self.pw, self.ph))
+            if cfg.get("watermark"):
+                under.append(("wm", cfg["watermark"], self.pw / 2, self.ph / 2))
+            if cfg.get("border"):
+                m = 28.0
+                under.append(("pgborder", m, m, self.pw - 2 * m, self.ph - 2 * m))
+            ops[0:0] = under
             head = df.fill_fields(cfg.get("header", ""), n, total, self.title)
             foot = df.fill_fields(cfg.get("footer", ""), n, total, self.title)
             num = df.page_number_text(cfg, n, total) if cfg["numbers"] != "none" and n >= int(cfg.get("num_from", 1)) else ""
@@ -355,6 +372,7 @@ class Paginator:
 
 def paginate(blocks, page=None, title=""):
     """Zwei Durchläufe, falls ein Inhaltsverzeichnis Seitenzahlen braucht. → (Seiten, Paginator)."""
+    blocks = df.accept_all(blocks)
     p = Paginator(blocks, page, title)
     pages = p.run()
     if any(b["t"] == "toc" for b in blocks):
@@ -391,6 +409,43 @@ def draw_page(cr, ops, scale=1.0):
             cr.set_source_rgb(0, 0, 0)
             cr.move_to(x, y - l2.get_baseline() / Pango.SCALE)
             PangoCairo.show_layout(cr, l2)
+        elif kind == "pagebg":
+            _, color, w, h = o
+            cr.set_source_rgb(*color)
+            cr.rectangle(0, 0, w, h)
+            cr.fill()
+        elif kind == "pgborder":
+            _, x, y, w, h = o
+            cr.set_source_rgb(0.25, 0.25, 0.25)
+            cr.set_line_width(1.2)
+            cr.rectangle(x, y, w, h)
+            cr.stroke()
+        elif kind == "wm":
+            _, text, cx, cy = o
+            lay = PangoCairo.create_layout(cr)
+            PangoCairo.context_set_resolution(lay.get_context(), 72)
+            lay.set_font_description(Pango.FontDescription.from_string(f"{df.BASE_FONT} Bold 72"))
+            lay.set_text(text, -1)
+            w, h = lay.get_pixel_size()
+            fit = min(1.0, (cx * 2 * 0.9) / max(1, w * 0.72))         # lange Texte verkleinern
+            cr.save()
+            cr.translate(cx, cy)
+            cr.rotate(-0.7854)
+            cr.scale(fit, fit)
+            cr.set_source_rgba(0.5, 0.5, 0.5, 0.22)
+            cr.move_to(-w / 2, -h / 2)
+            PangoCairo.show_layout(cr, lay)
+            cr.restore()
+        elif kind == "lnum":
+            _, text, x, base = o
+            lay = PangoCairo.create_layout(cr)
+            PangoCairo.context_set_resolution(lay.get_context(), 72)
+            lay.set_font_description(Pango.FontDescription.from_string(f"{df.BASE_FONT} 7.5"))
+            lay.set_text(text, -1)
+            w, _h = lay.get_pixel_size()
+            cr.set_source_rgb(0.45, 0.45, 0.45)
+            cr.move_to(x - w, base - lay.get_baseline() / Pango.SCALE)
+            PangoCairo.show_layout(cr, lay)
         elif kind in ("layout", "decor"):
             _, lay, x, y = o
             cr.set_source_rgb(*((0.35, 0.35, 0.35) if kind == "decor" else (0, 0, 0)))

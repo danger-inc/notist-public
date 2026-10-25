@@ -6,6 +6,32 @@ from gi.repository import Gdk, GLib, Gtk
 
 import writer as wr
 
+# Gemeinsamer Look aller Suchleisten (Notizen, Words, LaTeX) – wie die Suche in Code-Editoren: eine schmale Karte
+# oben rechts im Text, Eingabefeld ohne eigenen Rahmen, flache Knöpfe, Akzentrahmen. Andere -ist-Apps übernehmen ihn,
+# indem sie ihre Leiste mit style(bar) versehen und CSS in ihr Stylesheet aufnehmen (nur Farben aus dem Theme).
+CSS = """
+.ist-find { background-color: alpha(@background, 0.94); border: 1px solid alpha(@primary, 0.55); border-radius: 6px;
+    padding: 3px 4px; margin: 4px 4px 8px 4px; box-shadow: 0 4px 14px rgba(0,0,0,0.25); }
+.ist-find entry, .ist-find searchentry, .ist-find entry.pb, .ist-find searchentry.pb {
+    background-color: alpha(@foreground, 0.07); background-image: none; border: 1px solid transparent; border-radius: 4px;
+    box-shadow: none; min-height: 24px; padding: 0 6px; outline: none; color: @foreground; }
+.ist-find entry:focus-within, .ist-find searchentry:focus-within { border-color: @primary; }
+.ist-find button, .ist-find button.wt, .ist-find button.pb, .ist-find togglebutton.wt {
+    background: none; background-image: none; box-shadow: none; border: 1px solid transparent; border-radius: 4px;
+    min-height: 22px; min-width: 22px; padding: 0 6px; color: @foreground; }
+.ist-find button:hover, .ist-find togglebutton:hover { background-color: alpha(@primary, 0.2); }
+.ist-find togglebutton:checked { background-color: alpha(@primary, 0.25); border-color: @primary; }
+.ist-find .wstatus, .ist-find .tex-status { color: alpha(@foreground, 0.6); font-size: 12px; padding: 0 4px; }
+"""
+
+
+def style(bar):
+    """Suchleiste im gemeinsamen Look: Karte, volle Breite."""
+    bar.add_css_class("ist-find")
+    bar.set_halign(Gtk.Align.FILL)
+    bar.set_hexpand(True)
+    return bar
+
 
 class AllPart(Gtk.Box):
     """Rechter Teil der Suchleiste: „󰍉 alle notizen · 3“. count(q) → Anzahl, go(q) → Listensuche."""
@@ -59,6 +85,7 @@ class NoteFind:
         bar.set_layout_manager(wr.WrapLayout(spacing=6, row_spacing=4))
         bar.add_css_class("findbar")
         bar.add_css_class("note-find")
+        style(bar)
         self.entry = Gtk.SearchEntry(placeholder_text="In dieser Notiz suchen", width_chars=20)
         self.entry.add_css_class("pb")
         self.entry.connect("search-changed", lambda *_: self.run())
