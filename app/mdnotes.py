@@ -162,9 +162,18 @@ def _wrap(text, styles):
     return lead + core + trail
 
 
-def from_note(text, rich, title=""):
-    """(text, rich) → Markdown."""
-    text = text.replace("￼", "")
+def table_md(rows):
+    """Tabelle einer Notiz → Markdown-Tabelle (erste Zeile = Kopf)."""
+    rows = [list(r) for r in rows if r] or [[""]]
+    ncol = max(len(r) for r in rows)
+    line = lambda r: "| " + " | ".join((r[c] if c < len(r) else "").replace("\n", " ").replace("|", "\\|")
+                                       for c in range(ncol)) + " |"
+    return "\n".join([line(rows[0]), "|" + "---|" * ncol] + [line(r) for r in rows[1:]])
+
+
+def from_note(text, rich, title="", images=None):
+    """(text, rich) → Markdown. Platzhalter (U+FFFC) = Bilder (entfallen) oder Tabellen (images[k]["table"])."""
+    slots = iter(images or [])
     styles = [set() for _ in range(len(text) + 1)]
     for a, b, n in rich or []:
         st = n
@@ -204,6 +213,12 @@ def from_note(text, rich, title=""):
         md = "".join(_wrap(t, set(s or ())) for t, s in chunks)
         if not prefix and re.match(r"^(#{1,6} |[-*+] |\d+\. |> )", md):
             md = "\\" + md                       # sonst würde es beim Wiedereinlesen zur Liste/Überschrift
+        if "￼" in md:
+            parts = md.split("￼")
+            md = parts[0]
+            for rest in parts[1:]:
+                info = next(slots, None) or {}
+                md += ("\n\n" + table_md(info["table"]["rows"]) + "\n\n" if info.get("table") else "") + rest
         lines_out.append(prefix + md)
         pos += len(line) + 1
     body = "\n".join(lines_out)

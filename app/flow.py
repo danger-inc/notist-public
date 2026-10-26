@@ -121,14 +121,12 @@ class FlowMode:
         if ln is not None and w.editable and ln < buf.get_line_count():
             ok, it = buf.get_iter_at_line(ln)
             r = view.get_iter_location(it)          # erste Bildschirmzeile des Absatzes (ohne Abstand darüber)
-            lay = view.create_pango_layout("󰐕")
-            lay.set_font_description(Pango.FontDescription.from_string(f"Noto Sans {12 * w.zoom:.1f}"))
-            ink, _lg = lay.get_pixel_extents()
-            x = w.geo["side"] - GUTTER + 10
-            snap.save()                             # „+“ mittig auf die Zeile (auch bei Überschriften)
-            snap.translate(Graphene.Point().init(x, r.y + r.height / 2 - (ink.y + ink.height / 2)))
-            snap.append_layout(lay, rgba(fg, 0.55))
-            snap.restore()
+            x = w.geo["side"] - GUTTER + 10         # „+“ als Vektor: unabhängig von Schriften (Windows ohne Icon-Font)
+            half, th = 5.5 * w.zoom, max(1.4, 1.5 * w.zoom)
+            cx, cy = x + 7 * w.zoom, r.y + r.height / 2
+            col = rgba(fg, 0.55)
+            snap.append_color(col, Graphene.Rect().init(cx - half, cy - th / 2, 2 * half, th))
+            snap.append_color(col, Graphene.Rect().init(cx - th / 2, cy - half, th, 2 * half))
 
     # ================= Maus =================
     def line_at(self, x, y):

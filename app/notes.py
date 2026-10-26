@@ -629,6 +629,28 @@ class NotesWindow(Gtk.ApplicationWindow):
             GLib.idle_add(lambda: self._on_width(width, height) and False)
 
 
+class NoteTableHost:
+    """Was writer.TableBlock von „seinem“ Editor erwartet – hier für Tabellen mitten in Notizen."""
+
+    def __init__(self, app):
+        self.app = app
+
+    def checkpoint(self):
+        pass                                    # Rückgängig bündelt der Notiz-Verlauf über note_changed()
+
+    def child_changed(self):
+        self.app.note_table_changed()
+
+    def goto_line(self, line):
+        pass
+
+    def focus_text(self):
+        self.app.text.grab_focus()
+
+    def remove_block(self, w):
+        self.app.remove_note_table(w)
+
+
 class Notes(Gtk.Application):
     def __init__(self):
         super().__init__(application_id=APP_ID, flags=Gio.ApplicationFlags.HANDLES_OPEN)
@@ -801,13 +823,7 @@ class Notes(Gtk.Application):
         """Changelog-Fenster in den Farben des gewählten Designs."""
         import changelog
         import themes
-        theme = self.prefs.get("theme", "auto")
-        colors = themes.css(theme) if theme in themes.THEMES else None
-        if colors is None:
-            try:
-                colors = themes.css(themes.DEFAULT) + open(MATUGEN_CSS).read()
-            except OSError:
-                colors = themes.css(themes.DEFAULT)
+        colors = themes.resolve()[0]
         if getattr(self, "ver_btn", None):
             self.ver_btn.remove_css_class("news")
             self.ver_btn.add_css_class("off")
@@ -825,24 +841,7 @@ class Notes(Gtk.Application):
 
     def load_css(self, *_):
         import themes
-        theme = self.prefs.get("theme", "auto")
-        if theme in themes.THEMES:
-            css = themes.css(theme)
-        else:                                   # automatisch: Desktop-Farben, sonst Standard-Design
-            css = themes.css(themes.DEFAULT)
-            try:
-                css += open(MATUGEN_CSS).read()
-            except OSError:
-                pass
-        import re as _re
-        bgs = _re.findall(r"@define-color\s+background\s+#([0-9a-fA-F]{6})", css)
-        if theme in themes.THEMES:
-            light = themes.is_light(theme)
-        elif bgs:                               # Desktop-Farben: hell oder dunkel an der Hintergrundfarbe erkennen
-            r, g, b = (int(bgs[-1][i:i + 2], 16) for i in (0, 2, 4))
-            light = (0.299 * r + 0.587 * g + 0.114 * b) > 140
-        else:
-            light = False
+        css, light = themes.resolve()           # gewähltes Design, sonst Desktop-Farben (hell/dunkel nach Wahl)
         try:                                    # GTK-Grundthema (Auswahllisten, Menüs) passend hell/dunkel
             Gtk.Settings.get_default().set_property("gtk-application-prefer-dark-theme", not light)
         except TypeError:
@@ -919,7 +918,11 @@ class Notes(Gtk.Application):
         self.css = Gtk.CssProvider()
         Gtk.StyleContext.add_provider_for_display(Gdk.Display.get_default(), self.css,
                                                   Gtk.STYLE_PROVIDER_PRIORITY_USER)
+        import themes
+        if not themes.exists() and self.prefs.get("theme") in themes.THEMES:      # bisherige Wahl übernehmen
+            themes.save(theme=self.prefs["theme"])
         self.load_css()
+        self.theme_mon = themes.watch(self.load_css)        # Design in den Einstellungen irgendeiner -ist-App geändert
         # Super+W: matugen schreibt colors.css (teils in mehreren Schritten, teils per Umbenennen) →
         # Ordner beobachten, entprellen, erst laden wenn die Datei vollständig ist (wie in scourge).
         self._css_timer = 0
@@ -1206,7 +1209,11 @@ class Notes(Gtk.Application):
         self.left = left
 
         self.right = Gtk.Stack(hexpand=True, transition_type=Gtk.StackTransitionType.CROSSFADE)
-        body.set_end_child(self.right)
+        # Mindestbreite des Editors darf den Trenner nicht begrenzen (Ubuntu: Schrift größer → Leiste ließ sich kaum ziehen)
+        right_wrap = Gtk.ScrolledWindow(hscrollbar_policy=Gtk.PolicyType.EXTERNAL, vscrollbar_policy=Gtk.PolicyType.NEVER,
+                                        hexpand=True, vexpand=True, min_content_width=0)
+        right_wrap.set_child(self.right)
+        body.set_end_child(right_wrap)
         body.set_position(int(self.prefs.get("side_width", 330)))
         body.connect("notify::position", self.on_side_moved)
         self.right.add_named(self.build_editor(), "editor")
@@ -1343,8 +1350,10 @@ class Notes(Gtk.Application):
               wr.tool("󰉻", "Nummerierung – oder „1. “ tippen", lambda *_: self.toggle_list("number")),
               wr.tool("\U000F0C52", "Checkliste ein/aus (Strg+Umschalt+L)", lambda *_: self.toggle_checklist()))
         self.spell_btns = []
+        self.tbl_btn = wr.tool("󰓫", "Tabelle einfügen", None)
+        self.tbl_btn.connect("clicked", lambda b: self.ask_note_table(b))
         group(wr.tool("󰋩", "Bild einfügen – oder einfach mit Strg+V einfügen bzw. hineinziehen",
-                      lambda *_: self.pick_note_image()), self.make_spell_btn("wts"), last=True)
+                      lambda *_: self.pick_note_image()), self.tbl_btn, self.make_spell_btn("wts"), last=True)
         self.fmt_bar = fmt
         note.append(fmt)
 
@@ -1352,6 +1361,7 @@ class Notes(Gtk.Application):
         self.text = Gtk.TextView(wrap_mode=Gtk.WrapMode.WORD_CHAR, top_margin=2, bottom_margin=12,
                                  left_margin=0, right_margin=4, pixels_inside_wrap=2)
         self.text.add_css_class("note-text")
+        self.text.add_tick_callback(self._tbl_tick)
         wr.calm_handles(self.text)
         buf = self.text.get_buffer()
         buf.create_tag("bold", weight=Pango.Weight.BOLD)
@@ -1367,6 +1377,8 @@ class Notes(Gtk.Application):
         self.n_undo, self.n_redo, self.n_last, self._n_pending, self._n_before = [], [], None, None, None
         buf.connect("changed", lambda *_: self.queue_checks())
         self.note_images = {}            # Gdk.Texture → {"img", "mime", "w", "h"}
+        self.note_tables = {}            # Gtk.TextChildAnchor → writer.TableBlock (Tabellen in Notizen)
+        self.note_tbl_host = NoteTableHost(self)
         self.text.connect("paste-clipboard", self.on_note_paste)
         drop = Gtk.DropTarget.new(Gdk.FileList, Gdk.DragAction.COPY)
         drop.connect("drop", self.on_note_drop)
@@ -1844,7 +1856,7 @@ class Notes(Gtk.Application):
         elif self.tex:
             text = share.plain(n, self.kind)
         else:
-            text = md.from_note(n["text"], n.get("rich"), n["title"])
+            text = md.from_note(n["text"], n.get("rich"), n["title"], n.get("images"))
         self.win.get_clipboard().set(text)
         self.notify("In die Zwischenablage kopiert" + ("" if self.tex else " (als Markdown)"))
 
@@ -1870,7 +1882,7 @@ class Notes(Gtk.Application):
         else:
             path = os.path.join(d, name + ".md")
             with open(path, "w", encoding="utf-8") as f:
-                f.write(md.from_note(n["text"], n.get("rich"), n["title"]))
+                f.write(md.from_note(n["text"], n.get("rich"), n["title"], n.get("images")))
         return path
 
     def share_mail(self):
@@ -2102,15 +2114,97 @@ class Notes(Gtk.Application):
         return ok
 
     def collect_note_images(self):
+        """Bilder UND Tabellen in Reihenfolge der Platzhalter (U+FFFC) im Text; Tabellen = {"table": {rows, style}}."""
         buf = self.text.get_buffer()
         out = []
         text = buf.get_slice(buf.get_start_iter(), buf.get_end_iter(), True)
         for i, ch in enumerate(text):
             if ch == "\ufffc":
-                tex = buf.get_iter_at_offset(i).get_paintable()
+                it = buf.get_iter_at_offset(i)
+                tex = it.get_paintable()
                 if tex in self.note_images:
                     out.append(self.note_images[tex])
+                elif (blk := self.note_tables.get(it.get_child_anchor())) is not None:
+                    out.append({"table": {"rows": blk.rows(), "style": blk.model_style()}})
         return out
+
+    # ================= Tabellen in Notizen =================
+    def note_table_width(self):
+        """Breite aus dem Fenster statt aus dem Textfeld: dessen Breite wächst sonst mit der Tabelle mit (Rückkopplung)."""
+        avail = self.body.get_width() - (self.body.get_position() if self.body.get_start_child() else 0)
+        return max(200, avail - 64) if avail > 0 else 560
+
+    def insert_note_table(self, rows, style=None, at=None):
+        buf = self.text.get_buffer()
+        it = at or buf.get_iter_at_mark(buf.get_insert())
+        anchor = buf.create_child_anchor(it)
+        blk = wr.TableBlock(self.note_tbl_host, rows, style)
+        blk.set_width(self.note_table_width())
+        self.text.add_child_at_anchor(blk, anchor)
+        self.note_tables[anchor] = blk
+        return blk
+
+    def ask_note_table(self, btn):
+        if self.mode == "trash" or not self.current or self.docs or self.tex:
+            return
+        if getattr(self, "_tsize", None) is None:
+            pop = wr.close_outside(wr.ist_pop(Gtk.Popover(autohide=False, position=Gtk.PositionType.BOTTOM)))
+            pop.set_child(wr.TableSizePicker(self._note_table_picked))
+            pop.set_parent(btn)
+            self._tsize = pop
+        self._tsize.get_child().reset()
+        self._tsize.popup()
+
+    def _note_table_picked(self, rows, cols):
+        self._tsize.popdown()
+        self.text.grab_focus()
+        buf = self.text.get_buffer()
+        it = buf.get_iter_at_mark(buf.get_insert())
+        if not it.starts_line():
+            buf.insert(it, "\n")
+        blk = self.insert_note_table([[""] * cols for _ in range(rows)])
+        buf.insert_at_cursor("\n")
+        self.on_edit()
+        GLib.idle_add(lambda: blk.cells[0][0].tv.grab_focus() and False)
+
+    def note_table_changed(self):
+        if self._loading:
+            return
+        self.on_edit()
+        self.note_changed()
+
+    def remove_note_table(self, w):
+        # wie writer.remove_block: erst ausblenden, dann löschen (Absturz, wenn das Widget unter dem Zeiger mitten im Löschen verschwindet)
+        w.drop_design()
+        self.text.grab_focus()
+        w.set_visible(False)
+
+        def go():
+            buf = self.text.get_buffer()
+            for a, x in list(self.note_tables.items()):
+                if x is w:
+                    r = buf.get_iter_at_child_anchor(a)
+                    it = r[1] if isinstance(r, tuple) else r
+                    end = it.copy()
+                    end.forward_char()
+                    buf.delete(it, end)
+                    self.note_tables.pop(a, None)
+            self.on_edit()
+            return False
+        GLib.timeout_add(50, go)
+
+    def relayout_note_tables(self):
+        w = self.note_table_width()
+        for blk in self.note_tables.values():
+            if abs(blk.width - w) > 1:
+                blk.set_width(w)
+
+    def _tbl_tick(self, *_):
+        w = self.note_table_width()
+        if w != getattr(self, "_tbl_w", 0):
+            self._tbl_w = w
+            self.relayout_note_tables()
+        return GLib.SOURCE_CONTINUE
 
     def image_menu_at(self, x, y):
         bx, by = self.text.window_to_buffer_coords(Gtk.TextWindowType.WIDGET, int(x), int(y))
@@ -2330,7 +2424,7 @@ class Notes(Gtk.Application):
         self.flush(force=True)
         title = self.display_title(n)
         if self.kind == "notes":                  # Notiz → Markdown → Blöcke (Formatierung, Listen bleiben)
-            blocks = df.markdown_blocks(md.from_note(n["text"], n.get("rich"), "")) or [df.para()]
+            blocks = df.markdown_blocks(md.from_note(n["text"], n.get("rich"), "", n.get("images"))) or [df.para()]
         if target == "latex":
             if self.kind != "notes":
                 blocks = self.writer.to_model()
@@ -3724,6 +3818,36 @@ class Notes(Gtk.Application):
             return True
         return False
 
+    def indent_selection(self, back):
+        """Tab / Umschalt+Tab bei Markierung: alle berührten Zeilen um 4 Leerzeichen ein-/ausrücken (Markierung bleibt)."""
+        buf = self.text.get_buffer()
+        a, b = buf.get_selection_bounds()
+        first, last = a.get_line(), b.get_line()
+        if b.starts_line() and last > first:
+            last -= 1
+        so, eo = a.get_offset(), b.get_offset()
+        self.note_checkpoint()
+        buf.begin_user_action()
+        for l in range(first, last + 1):
+            ok, s = buf.get_iter_at_line(l)
+            if back:
+                text = self.line_text(l)
+                n = 1 if text[:1] == "\t" else len(text) - len(text.lstrip(" "))
+                n = min(n, 1 if text[:1] == "\t" else 4)
+                if n:
+                    buf.delete(s, self.iter_plus(s, n))
+                    eo -= n
+                    if l == first:
+                        so = max(so - n, s.get_offset())
+            else:
+                buf.insert(s, "    ")
+                eo += 4
+                if l == first:
+                    so += 4 if so > s.get_offset() else 0
+        buf.end_user_action()
+        buf.select_range(buf.get_iter_at_offset(so), buf.get_iter_at_offset(eo))
+        self.note_after_format()
+
     def toggle_list(self, kind):
         """Markierte Zeilen zu einer Aufzählung/Nummerierung machen – oder wieder zu normalem Text."""
         if self.docs:
@@ -3804,6 +3928,9 @@ class Notes(Gtk.Application):
             return False
         buf = self.text.get_buffer()
         if buf.get_has_selection():
+            if keyval in (Gdk.KEY_Tab, Gdk.KEY_ISO_Left_Tab) and self.text.get_editable():
+                self.indent_selection(keyval == Gdk.KEY_ISO_Left_Tab or bool(state & Gdk.ModifierType.SHIFT_MASK))
+                return True                      # Tab ersetzt die Markierung nicht, sondern rückt alle Zeilen ein
             return False
         if self.prefs.get("auto_lists", True) and self.list_key(keyval, state):
             return True
@@ -4250,7 +4377,7 @@ class Notes(Gtk.Application):
         if self.docs:
             return self.writer.to_model()
         n = self.current
-        return df.markdown_blocks(md.from_note(n["text"], n.get("rich"), n["title"]))
+        return df.markdown_blocks(md.from_note(n["text"], n.get("rich"), n["title"], n.get("images")))
 
     def export_to(self, path, fmt):
         n = self.current
@@ -4283,7 +4410,7 @@ class Notes(Gtk.Application):
                     xp.write_epub(blocks, path, title)
                 else:
                     if not self.docs and fmt == "md":
-                        text = md.from_note(n["text"], n.get("rich"), n["title"])
+                        text = md.from_note(n["text"], n.get("rich"), n["title"], n.get("images"))
                     elif not self.docs and fmt == "txt":
                         text = share.plain(n, "notes")
                     else:
@@ -4962,6 +5089,7 @@ class Notes(Gtk.Application):
         buf = self.text.get_buffer()
         buf.set_text(n["text"])
         self.note_images.clear()
+        self.note_tables.clear()
         imgs = n.get("images") or []
         spots = [i for i, ch in enumerate(n["text"]) if ch == "\ufffc"]
         for k, off in reversed(list(enumerate(spots))):
@@ -4969,7 +5097,11 @@ class Notes(Gtk.Application):
                 s = buf.get_iter_at_offset(off)
                 e = buf.get_iter_at_offset(off + 1)
                 buf.delete(s, e)
-                self.insert_note_image(imgs[k], buf.get_iter_at_offset(off))
+                if imgs[k].get("table"):
+                    t = imgs[k]["table"]
+                    self.insert_note_table(t.get("rows"), t.get("style"), buf.get_iter_at_offset(off))
+                else:
+                    self.insert_note_image(imgs[k], buf.get_iter_at_offset(off))
         for start, end, name in n.get("rich", []):
             tag = self.font_tag(name[5:]) if name.startswith("font:") else buf.get_tag_table().lookup(name)
             if tag:
@@ -5036,7 +5168,7 @@ class Notes(Gtk.Application):
     def note_state(self):
         buf = self.text.get_buffer()
         return (buf.get_slice(buf.get_start_iter(), buf.get_end_iter(), True), tuple(map(tuple, self.serialize_rich())),
-                tuple(i.get("img", "")[:40] + str(i.get("w")) for i in self.collect_note_images()))
+                tuple(i.get("img", "")[:40] + str(i.get("w")) + str(i.get("table", "")) for i in self.collect_note_images()))
 
     def note_cursor(self):
         buf = self.text.get_buffer()
@@ -5370,7 +5502,7 @@ class Notes(Gtk.Application):
                     else:
                         self.current["rich"] = self.serialize_rich()
                         self.current["images"] = self.collect_note_images()
-                        self.current["media"] = bool(self.current["images"])
+                        self.current["media"] = any(i.get("img") for i in self.current["images"])
                     self.store.save(self.current)
                 except Exception:
                     ok = False

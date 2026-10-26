@@ -1435,10 +1435,39 @@ def read_markdown(path):
     return markdown_blocks(open(path, encoding="utf-8", errors="replace").read())
 
 
+def _md_tables(lines):
+    """Zeilen → Zeilen, wobei Pipe-Tabellen („| a | b |“ + Trennzeile „|---|---|“) zu je einer Zeilenliste werden."""
+    def cells(l):
+        l = l.strip()
+        l = l[1:] if l.startswith("|") else l
+        l = l[:-1] if l.endswith("|") and not l.endswith("\\|") else l
+        return [c.strip().replace("\\|", "|") for c in re.split(r"(?<!\\)\|", l)]
+    out, i, fence = [], 0, False
+    while i < len(lines):
+        l = lines[i]
+        if l.startswith("```"):
+            fence = not fence
+        sep = lines[i + 1] if i + 1 < len(lines) else ""
+        if (not fence and "|" in l and re.match(r"^\s*\|?\s*:?-+:?\s*(\|\s*:?-+:?\s*)*\|?\s*$", sep)
+                and "|" in sep and len(cells(l)) == len(cells(sep))):
+            rows, i = [cells(l)], i + 2
+            while i < len(lines) and "|" in lines[i] and lines[i].strip():
+                rows.append(cells(lines[i]))
+                i += 1
+            out.append(rows)
+            continue
+        out.append(l)
+        i += 1
+    return out
+
+
 def markdown_blocks(text):
     """Markdown-Text → Blöcke (auch für Einfügen aus der Zwischenablage)."""
     blocks, code = [], False
-    for line in text.replace("\r\n", "\n").split("\n"):
+    for line in _md_tables(text.replace("\r\n", "\n").split("\n")):
+        if isinstance(line, list):                      # Markdown-Tabelle
+            blocks.append({"t": "table", "rows": line})
+            continue
         if line.startswith("```"):
             code = not code
             continue

@@ -316,7 +316,7 @@ def render(kind, note, path):
     if kind == "notes":
         if ext in (".md", ".markdown"):
             import mdnotes as md
-            body = md.from_note(note.get("text", ""), note.get("rich"))
+            body = md.from_note(note.get("text", ""), note.get("rich"), "", note.get("images"))
             # Titel als Überschrift nur, wenn er sich nicht schon aus dem Dateinamen ergibt
             if title and title != re.sub(r" \(\d+\)$", "", stem):
                 return f"# {title}\n\n{body}"

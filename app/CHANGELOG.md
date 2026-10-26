@@ -1,5 +1,15 @@
 # notist – Änderungen
 
+## 4.15.1 (2026-10-26)
+- **Tabellen in Notizen**: Neuer Knopf „Tabelle“ in der Notizen-Leiste (Größe wie in Words per Raster wählen). Die Tabelle steht mitten im Text, hat Zeilen/Spalten +/−, Design und Tab/Pfeile in den Zellen; sie wird mit der Notiz gespeichert und als Markdown-Tabelle exportiert (und von Markdown wieder als Tabelle erkannt).
+- **Tabellen-Design**: Die Leiste oben (+ zeile, + spalte …) ist an den -ist-Look angepasst. Die Design-Fläche liegt jetzt **rechts neben der Tabelle** (bei schmalem Fenster darunter) und verdeckt nichts mehr; die Tabelle wird dafür schmaler. Schließen mit „design“, ✕ oder Esc.
+- **Tab bei Markierung**: Markierter Text wird nicht mehr gelöscht, sondern eingerückt – auch über mehrere Zeilen (Umschalt+Tab rückt aus). In Notizen und Words.
+- **Ubuntu**: Die Seitenleiste lässt sich wieder weit nach rechts ziehen (die Mindestbreite des Editors bremste den Trenner).
+
+## 4.15.0 (2026-10-26)
+- **Design für alle Apps**: In den Einstellungen gibt es die Designauswahl jetzt in jeder -ist-App; die Wahl gilt für alle Apps zugleich und wirkt sofort in allen offenen Fenstern. Bei „Automatisch“ (Desktop-Farben) lässt sich zwischen **Dunkel** und **Hell** umschalten.
+- **Words „fließend“**: Das „+“ links neben der Zeile wird nicht mehr als Schriftzeichen, sondern als Vektor gezeichnet – unter Windows (und überall, wo die Icon-Schrift fehlt) erscheint es jetzt richtig.
+
 ## 4.14.2 (2026-10-25)
 - **Windows**: Speichern brach bei Zeichen wie „☑“ oder manchen Umlauten mit einem Zeichensatz-Fehler ab; Textdateien
   werden dort jetzt immer als UTF-8 gelesen und geschrieben.

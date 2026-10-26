@@ -194,53 +194,10 @@ class SettingsWindow(Gtk.Window):
         p = self.prefs
         self.head(box, "Allgemein")
         self.sec(box, "Design")
-        flow = Gtk.FlowBox(selection_mode=Gtk.SelectionMode.NONE, max_children_per_line=5, min_children_per_line=2,
-                           column_spacing=8, row_spacing=8, homogeneous=True)
-        self.theme_btns = {}
-        group = None
-        opts = [("auto", ("Automatisch", False, None, None, None, None, None, None))] + list(themes.THEMES.items())
-        for key, (name, light, bg, fg, acc, surf, *_r) in opts:
-            b = Gtk.ToggleButton(active=p.get("theme", "auto") == key)
-            b.add_css_class("theme-card")
-            if group:
-                b.set_group(group)
-            group = group or b
-            v = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6)
-            sw = Gtk.DrawingArea(content_width=96, content_height=40)
-            cols = [bg, surf, acc, fg] if bg else None
-
-            def draw(area, cr, w, h, cols=cols):
-                import math
-                if not cols:          # automatisch: Regenbogen-Andeutung
-                    for i, c in enumerate(("#8fcef3", "#ffb68e", "#8fd6a0", "#ffb0cd")):
-                        cr.set_source_rgb(*[int(c[j:j + 2], 16) / 255 for j in (1, 3, 5)])
-                        cr.rectangle(i * w / 4, 0, w / 4 + 1, h)
-                        cr.fill()
-                    return
-                bgc, sc, ac, fc = ([int(c[j:j + 2], 16) / 255 for j in (1, 3, 5)] for c in cols)
-                cr.set_source_rgb(*bgc)
-                cr.rectangle(0, 0, w, h)
-                cr.fill()
-                cr.set_source_rgb(*sc)
-                cr.rectangle(w * 0.35, h * 0.18, w * 0.58, h * 0.64)
-                cr.fill()
-                cr.set_source_rgb(*ac)
-                cr.arc(w * 0.18, h / 2, h * 0.22, 0, 2 * math.pi)
-                cr.fill()
-                cr.set_source_rgb(*fc)
-                cr.rectangle(w * 0.42, h * 0.38, w * 0.4, 3)
-                cr.rectangle(w * 0.42, h * 0.56, w * 0.28, 3)
-                cr.fill()
-            sw.set_draw_func(draw)
-            v.append(sw)
-            v.append(Gtk.Label(label=name + (" ☀" if light else "")))
-            b.set_child(v)
-            b.connect("toggled", lambda btn, k=key: btn.get_active() and self.set_theme(k))
-            flow.append(b)
-            self.theme_btns[key] = b
-        box.append(flow)
+        box.append(themes.picker(on_change=self.app.load_css))
         hint = Gtk.Label(xalign=0, wrap=True, label="„Automatisch“ übernimmt die Farben deines Desktops (matugen), "
-                                                     "falls vorhanden. Der Glas-Effekt oben rechts macht Fenster durchscheinend.")
+                                                     "falls vorhanden – dunkel oder hell nach Wahl. Das Design gilt für alle -ist-Apps. "
+                                                     "Der Glas-Effekt oben rechts macht Fenster durchscheinend.")
         hint.add_css_class("set-sub")
         box.append(hint)
         self.sec(box, "Allgemein")

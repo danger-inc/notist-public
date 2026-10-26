@@ -99,7 +99,9 @@ button.tcol.cur { border-color: @foreground; border-width: 2px; }
 .light .wtable .cell.head { background-color: rgba(0,0,0,0.06); }
 .tsize-lbl { font-size: 11px; opacity: 0.8; }
 .wtable .cell.colsel { box-shadow: inset 0 0 0 2px alpha(@primary, 0.75); }
-.wtable-bar button { padding: 0 6px; min-height: 18px; font-size: 11px; border-radius: 7px; }
+.wtable-bar { margin-bottom: 2px; }
+.wtable-bar button.tbtn { padding: 0 8px; min-height: 20px; font-size: 11px; border-radius: 4px; }
+.tside { border: 1px solid alpha(@primary, 0.5); border-radius: 6px; padding: 4px 8px; background-color: alpha(@background, 0.6); }
 .whr { min-height: 2px; background-color: alpha(@foreground, 0.4); margin: 9px 0; }
 .light .whr { background-color: rgba(0,0,0,0.45); }
 .wpb { font-size: 10px; font-weight: 800; letter-spacing: 2px; color: alpha(@foreground, 0.45);
@@ -743,34 +745,34 @@ class TableBlock(Gtk.Box):
                                ("− zeile", "Aktuelle Zeile entfernen", lambda *_: self.del_row()),
                                ("− spalte", "Aktuelle Spalte entfernen", lambda *_: self.del_col())):
             b = Gtk.Button(label=label, tooltip_text=tip, focus_on_click=False)
-            b.add_css_class("pb"); b.add_css_class("small")
+            b.add_css_class("tbtn")
             b.connect("clicked", cb)
             self.bar.append(b)
-        # Das Popover hängt am Writer statt am Knopf: Popovers in Widgets, die im Textfeld verankert sind,
-        # bekommen von GTK keine Größe und bleiben unsichtbar (Tabelleneinstellungen „schlossen sich sofort“).
+        # Design-Fläche sitzt RECHTS NEBEN der Tabelle (schmal: darunter) und schiebt sie schmaler statt sie zu
+        # verdecken; kein Popover → auch bei Touch stabil. Zu: „design“ nochmal, ✕ oder Esc.
         self.design_btn = Gtk.Button(label="󰏘 design", tooltip_text="Aussehen der Tabelle", focus_on_click=False)
-        self.design_btn.add_css_class("pb"); self.design_btn.add_css_class("small")
+        self.design_btn.add_css_class("tbtn")
         self.design_btn.connect("clicked", lambda *_: self.open_design())
-        # autohide=False: mit Grab schließt Hyprland das Popup bei Touch-Tipps hinein („Einstellung antippen →
-        # Einstellungen weg“). Schließen daher selbst: Tipp außerhalb der Tabelle, Esc, „design“, Wegscrollen.
-        self.design_pop = ist_pop(Gtk.Popover(position=Gtk.PositionType.BOTTOM, autohide=False))
-        self.design_pop.add_css_class("tdesign")      # deckend: liegt über Text (Glas machte es unlesbar)
-        self.design_pop.set_child(self.build_design())
+        self.side = Gtk.Revealer(transition_type=Gtk.RevealerTransitionType.SLIDE_DOWN, reveal_child=False)
+        panel = Gtk.Box()
+        panel.add_css_class("tside")
+        panel.append(self.build_design())
+        self.side.set_child(panel)
         esc = Gtk.EventControllerKey()
-        esc.connect("key-pressed", lambda _c, kv, *_: kv == Gdk.KEY_Escape and (self.design_pop.popdown(), True)[1])
-        self.design_pop.add_controller(esc)
-        self._dwatch = None
-        self.design_pop.connect("show", lambda *_: self.sync_design())
-        self.connect("unrealize", lambda *_: self.drop_design())
+        esc.connect("key-pressed", lambda _c, kv, *_: kv == Gdk.KEY_Escape and (self.close_design(), True)[1])
+        self.side.add_controller(esc)
         self.bar.append(self.design_btn)
         rm = Gtk.Button(label="󰆴", tooltip_text="Ganze Tabelle entfernen", focus_on_click=False)
-        rm.add_css_class("pb"); rm.add_css_class("small")
+        rm.add_css_class("tbtn"); rm.add_css_class("danger")
         rm.connect("clicked", lambda *_: writer.remove_block(self))
         self.bar.append(rm)
         self.rev = Gtk.Revealer(transition_type=Gtk.RevealerTransitionType.SLIDE_DOWN, reveal_child=False)
-        self.rev.set_child(self.bar)
+        head = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=3)
+        head.append(self.bar)
+        head.append(self.side)
+        self.rev.set_child(head)
         self.append(self.rev)
-        self.grid = Gtk.Grid(column_homogeneous=False)
+        self.grid = Gtk.Grid(column_homogeneous=False, valign=Gtk.Align.START)
         self.append(self.grid)
         fc = Gtk.EventControllerFocus()
         fc.connect("enter", lambda *_: self.rev.set_reveal_child(True))
@@ -782,13 +784,6 @@ class TableBlock(Gtk.Box):
         tap.connect("pressed", self._on_tap)
         self.add_controller(tap)
         self._tap_t = 0
-        self._pop_t = 0
-        ptap = Gtk.GestureClick(button=0)
-        ptap.set_propagation_phase(Gtk.PropagationPhase.CAPTURE)
-        ptap.connect("pressed", lambda *_: setattr(self, "_pop_t", GLib.get_monotonic_time()))
-        self.design_pop.add_controller(ptap)
-        self.design_pop.connect("closed", lambda *_: (self.watch_design(False), self.mark_col(False),
-                                                      GLib.timeout_add(80, self.after_design)))
         self.focus = (0, 0)
         self.cells = []
         self.width = 400
@@ -798,7 +793,7 @@ class TableBlock(Gtk.Box):
         # verzögert: ein Druck auf „design“ holt kurz den Fokus ins Textfeld, bevor das Popover aufgeht
         if GLib.get_monotonic_time() - self._tap_t < 700_000:     # gerade in die Tabelle getippt
             return False
-        if not (self.design_pop.get_visible() or self.has_focus_inside()):
+        if not (self.design_open() or self.has_focus_inside()):
             self.rev.set_reveal_child(False)
         return False
 
@@ -825,7 +820,7 @@ class TableBlock(Gtk.Box):
     def has_focus_inside(self):
         root = self.get_root()
         f = root.get_focus() if root else None
-        return bool(f and (f.is_ancestor(self) or f.is_ancestor(self.design_pop)))
+        return bool(f and f.is_ancestor(self))
 
     def make_cell(self, text, r, c):
         tv = Gtk.TextView(wrap_mode=Gtk.WrapMode.WORD_CHAR, accepts_tab=False, hexpand=True)
@@ -847,7 +842,7 @@ class TableBlock(Gtk.Box):
 
     def cell_entered(self, tv):
         self.focus = self.pos_of(tv)
-        if self.design_pop.get_visible():         # Design offen: Spalte per Klick wechseln
+        if self.design_open():                    # Design offen: Spalte per Klick wechseln
             self.sync_design()
 
     def mark_col(self, on=True):
@@ -884,9 +879,8 @@ class TableBlock(Gtk.Box):
                 line.append(f)
             self.cells.append(line)
         self.apply_style()
-        if self.design_pop.get_visible():
+        if self.design_open():
             self.mark_col(True)
-            GLib.timeout_add(60, self._design_follow)      # Tabelle höher/niedriger → Popover nachziehen
 
     def apply_style(self):
         st = self.style
@@ -1040,92 +1034,36 @@ class TableBlock(Gtk.Box):
                 return
 
     # ---------- Design ----------
+    def design_open(self):
+        return self.side.get_reveal_child()
+
     def open_design(self):
-        host, pop = self.writer, self.design_pop
-        if pop.get_visible():                     # „design“ nochmal = zu
-            pop.popdown()
+        if self.design_open():                    # „design“ nochmal = zu
+            self.close_design()
             return
-        if pop.get_parent() is not host:
-            if pop.get_parent() is not None:
-                pop.unparent()
-            pop.set_parent(host)
         self.rev.set_reveal_child(True)
         if not self.has_focus_inside():           # Fokus zurück in die Zelle (Tippen landet sonst im Text)
             r, c = self.focus
             if r < len(self.cells) and c < len(self.cells[r]):
                 self.cells[r][c].tv.grab_focus()
-        if not self.place_design():
+        self.sync_design()
+        self.side.set_reveal_child(True)
+
+    def close_design(self):
+        if not self.design_open():
             return
-        self.watch_design(True)
-        pop.popup()
-
-
-    def place_design(self):
-        ok, b = self.design_btn.compute_bounds(self.writer)
-        if not ok:
-            return self.design_pop.get_visible()  # offen: alte Position behalten (Knopf wird gerade neu eingebaut)
-        sc = self.writer.scroll
-        ok2, top = sc.compute_bounds(self.writer)
-        if ok2 and (b.get_y() + b.get_height() < top.get_y() or b.get_y() > top.get_y() + top.get_height()):
-            return False                          # Knopf aus dem Bild gescrollt
-        # unter (oder über) die ganze Tabelle, nicht an den Knopf: so bleiben alle Spalten frei zum Antippen
-        ok3, tb = self.grid.compute_bounds(self.writer)
-        if ok3 and tb.get_height() < 600:
-            self.design_pop.set_pointing_to(_rect(b.get_x(), tb.get_y(), b.get_width(), tb.get_height()))
-        else:
-            self.design_pop.set_pointing_to(_rect(b.get_x(), b.get_y(), b.get_width(), b.get_height()))
-        return True
-
-    def watch_design(self, on):
-        """Solange das Popover offen ist: Tipp/Klick ins Dokument außerhalb der Tabelle schließt es,
-        Scrollen schiebt es mit."""
-        w = self.writer
-        if on and self._dwatch is None:
-            root = w.get_root()
-            click = Gtk.GestureClick(button=0)
-            click.set_propagation_phase(Gtk.PropagationPhase.CAPTURE)
-            click.connect("pressed", self._design_outside)
-            root.add_controller(click)
-            adj = w.scroll.get_vadjustment()
-            hid = adj.connect("value-changed", lambda *_: GLib.idle_add(self._design_follow))
-            self._dwatch = (root, click, adj, hid)
-        elif not on and self._dwatch is not None:
-            root, click, adj, hid = self._dwatch
-            self._dwatch = None
-            root.remove_controller(click)
-            adj.disconnect(hid)
-
-    def _design_follow(self):
-        if self.design_pop.get_visible() and not self.place_design():
-            self.design_pop.popdown()
-        return False
-
-    def _design_outside(self, g, n, x, y):
-        hit = g.get_widget().pick(x, y, Gtk.PickFlags.DEFAULT)
-        GLib.idle_add(self._design_outside_late, hit)
-
-    def _design_outside_late(self, hit):
-        # das Popover meldet seinen eigenen Tipp erst NACH dem Fenster (Capture läuft von außen nach innen)
-        if GLib.get_monotonic_time() - self._pop_t < 300_000:
-            return False                          # Tipp ins Popover selbst
-        if hit is None or not (hit is self or hit.is_ancestor(self)):
-            self.design_pop.popdown()
-        elif self.design_pop.get_visible():
-            self.sync_design()
-        return False
+        self.side.set_reveal_child(False)
+        self.mark_col(False)
+        GLib.timeout_add(80, self.after_design)
 
     def drop_design(self):
-        """Tabelle verschwindet (gelöscht, Rückgängig, anderes Dokument): Popover vom Writer lösen."""
-        pop = self.design_pop
-        self.watch_design(False)
-        if pop.get_parent() is not None:
-            pop.popdown()
-            pop.unparent()
+        """Tabelle verschwindet (gelöscht, Rückgängig, anderes Dokument)."""
+        self.side.set_reveal_child(False)
 
     def after_design(self):
         root = self.get_root()
         f = root.get_focus() if root else None
-        if self.get_mapped() and (f is None or not (f.is_ancestor(self) or f.is_ancestor(self.design_pop))):
+        if self.get_mapped() and (f is None or not f.is_ancestor(self)):
             r, c = self.focus                     # zurück in die Zelle, in der man vorher war (Cursor bleibt)
             if r < len(self.cells) and c < len(self.cells[r]):
                 self.cells[r][c].tv.grab_focus()
@@ -1133,42 +1071,47 @@ class TableBlock(Gtk.Box):
         return False
 
     def build_design(self):
-        box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6, width_request=280)
-        h = Gtk.Label(label="TABELLE", xalign=0)
-        h.add_css_class("wpop-head")
-        box.append(h)
+        """Design-Einstellungen als Zeile in der Tabellen-Kopfleiste (bricht bei Platzmangel um)."""
+        box = Gtk.Box()
+        box.set_layout_manager(WrapLayout(spacing=14, row_spacing=4))
         self.d_sw = {}
-        for key, text in (("head", "Kopfzeile"), ("first_col", "Erste Spalte betont"), ("stripes", "Streifen")):
-            row = Gtk.Box(spacing=8)
-            row.append(Gtk.Label(label=text, xalign=0, hexpand=True))
-            sw = Gtk.Switch(valign=Gtk.Align.CENTER)
-            sw.connect("notify::active", lambda s, _p, k=key: self.set_opt(k, s.get_active()))
-            row.append(sw)
-            self.d_sw[key] = sw
-            box.append(row)
+
+        def group(title=None):
+            g = Gtk.Box(spacing=3)
+            if title is not None:
+                l = Gtk.Label(label=title, xalign=0)
+                l.add_css_class("tsub")
+                g.append(l)
+                g._title = l
+            box.append(g)
+            return g
+
+        def chip(g, label, tip, toggle=True):
+            b = (Gtk.ToggleButton if toggle else Gtk.Button)(label=label, tooltip_text=tip, focus_on_click=False)
+            b.add_css_class("tchip")
+            g.append(b)
+            return b
+        for key, text in (("head", "Kopfzeile"), ("first_col", "Erste Spalte"), ("stripes", "Streifen")):
+            b = chip(group(), text, text)
+            b.connect("toggled", lambda b, k=key: self.set_opt(k, b.get_active()))
+            self.d_sw[key] = b
 
         def chips(title, items, key):
-            box.append(self._sub(title))
-            row = Gtk.Box(spacing=3, homogeneous=True)
-            group, out = None, {}
+            g, grp, out = group(title), None, {}
             for val, label, tip in items:
-                b = Gtk.ToggleButton(label=label, tooltip_text=tip, focus_on_click=False)
-                b.add_css_class("tchip")
-                if group:
-                    b.set_group(group)
-                group = group or b
+                b = chip(g, label, tip)
+                if grp:
+                    b.set_group(grp)
+                grp = grp or b
                 b.connect("toggled", lambda b, v=val: b.get_active() and self.set_opt(key, v))
-                row.append(b)
                 out[val] = b
-            box.append(row)
             return out
         self.d_border = chips("Rahmen", (("grid", "󰕰 gitter", "Alle Linien"), ("rows", "󰕭 zeilen", "Nur waagerecht"),
                                          ("outer", "󰝣 außen", "Nur der Rand"), ("none", "ohne", "Keine Linien")),
                               "border")
         self.d_pad = chips("Abstand", (("compact", "eng", "Wenig Innenabstand"), ("normal", "normal", ""),
                                        ("wide", "weit", "Viel Innenabstand")), "pad")
-        box.append(self._sub("Farbe"))
-        sw_row = Gtk.Box(spacing=4)
+        g = group("Farbe")
         self.d_colors = {}
         for col in (None,) + df.TABLE_ACCENTS:
             b = Gtk.Button(focus_on_click=False, tooltip_text="Ohne Farbe" if col is None else col)
@@ -1179,34 +1122,23 @@ class TableBlock(Gtk.Box):
             else:
                 b.add_css_class(f"tcol-{df.TABLE_ACCENTS.index(col)}")
             b.connect("clicked", lambda _b, v=col: self.set_opt("accent", v))
-            sw_row.append(b)
+            g.append(b)
             self.d_colors[col] = b
-        box.append(sw_row)
-        self.d_colhead = self._sub("Spalte")
-        box.append(self.d_colhead)
-        crow = Gtk.Box(spacing=3)
-        self.d_align = {}
-        group = None
+        g = group("Spalte")
+        self.d_colhead = g._title
+        self.d_align, grp = {}, None
         for val, icon, tip in (("left", "󰉢", "Linksbündig"), ("center", "󰉠", "Zentriert"), ("right", "󰉣", "Rechtsbündig")):
-            b = Gtk.ToggleButton(label=icon, tooltip_text=tip, focus_on_click=False)
-            b.add_css_class("tchip")
-            if group:
-                b.set_group(group)
-            group = group or b
+            b = chip(g, icon, tip)
+            if grp:
+                b.set_group(grp)
+            grp = grp or b
             b.connect("toggled", lambda b, v=val: b.get_active() and self.set_align(v))
-            crow.append(b)
             self.d_align[val] = b
-        crow.append(Gtk.Box(hexpand=True))
         for icon, tip, d in (("󰍴", "Spalte schmaler", -1), ("󰐕", "Spalte breiter", 1)):
-            b = Gtk.Button(label=icon, tooltip_text=tip, focus_on_click=False)
-            b.add_css_class("tchip")
-            b.connect("clicked", lambda _b, d=d: self.resize_col(d))
-            crow.append(b)
-        eq = Gtk.Button(label="gleich", tooltip_text="Alle Spalten gleich breit", focus_on_click=False)
-        eq.add_css_class("tchip")
-        eq.connect("clicked", lambda *_: self.set_opt("widths", []))
-        crow.append(eq)
-        box.append(crow)
+            chip(g, icon, tip, toggle=False).connect("clicked", lambda _b, d=d: self.resize_col(d))
+        chip(g, "gleich", "Alle Spalten gleich breit", toggle=False).connect("clicked", lambda *_: self.set_opt("widths", []))
+        x = chip(group(), "󰅖", "Design schließen (Esc)", toggle=False)
+        x.connect("clicked", lambda *_: self.close_design())
         return box
 
     @staticmethod
@@ -1237,9 +1169,8 @@ class TableBlock(Gtk.Box):
         self.style[key] = value
         self.apply_style()
         self.writer.child_changed()
-        if self.design_pop.get_visible():
+        if self.design_open():
             self.sync_design()
-            GLib.timeout_add(60, self._design_follow)
 
     def set_align(self, val):
         if getattr(self, "_dsync", False):
@@ -4063,7 +3994,7 @@ class Writer(ReviewMixin, Gtk.Box):
         it = self.buf.get_iter_at_mark(self.buf.get_insert())
         line = it.get_line()
         a = self.para_at(line)
-        if keyval in (Gdk.KEY_Tab, Gdk.KEY_ISO_Left_Tab) and a["list"] and not self.buf.get_has_selection():
+        if keyval in (Gdk.KEY_Tab, Gdk.KEY_ISO_Left_Tab) and (a["list"] or self.buf.get_has_selection()):   # Markierung: einrücken statt ersetzen
             self.change_indent(-1 if (shift or keyval == Gdk.KEY_ISO_Left_Tab) else 1)
             return True
         if keyval in (Gdk.KEY_Return, Gdk.KEY_KP_Enter) and a["list"] and not shift:
