@@ -31,6 +31,7 @@ BLOCKS = (
     ("table", "󰓫", "tabelle", "tabelle table"),
     ("image", "󰋩", "bild …", "bild image foto"),
     ("toc", "󰠶", "inhaltsverzeichnis", "inhalt toc verzeichnis"),
+    ("pdf", "󰈦", "pdf", "pdf anhang datei dokument"),
     ("date", "󰃭", "datum von heute", "datum date heute"),
     ("footnote", "󰯃", "fußnote", "fußnote footnote"),
 )
@@ -337,6 +338,8 @@ class FlowMode:
             w.pick_image(own_line=True)
         elif key == "toc":
             w.insert_block("toc")
+        elif key == "pdf":
+            w.pick_pdf()
         elif key == "date":
             w.insert_date()
         elif key == "footnote":

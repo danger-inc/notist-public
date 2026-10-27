@@ -34,6 +34,13 @@ def bundle(note, kind):
                         continue
                     with open(full, "rb") as fh:
                         data["files"][rel] = base64.b64encode(fh.read()).decode()
+    if kind == "docs":                   # PDF-Anhänge aus notist/data/pdfs gehören mit in die Datei
+        import pdfblock
+        for blk in note.get("blocks") or []:
+            f = blk.get("file") if blk.get("t") == "pdf" else None
+            if f and os.path.exists(pdfblock.path_of(f)):
+                with open(pdfblock.path_of(f), "rb") as fh:
+                    data["files"]["pdfs/" + os.path.basename(f)] = base64.b64encode(fh.read()).decode()
     return json.dumps(data, ensure_ascii=False)
 
 
@@ -61,6 +68,11 @@ def read_bundle(path):
 def write_files(nid, files):
     d = os.path.join(paths.LATEX_FILES, nid)
     for rel, blob in files.items():
+        if rel.startswith("pdfs" + os.sep):
+            os.makedirs(os.path.join(paths.DATA, "pdfs"), exist_ok=True)
+            with open(os.path.join(paths.DATA, "pdfs", os.path.basename(rel)), "wb") as f:
+                f.write(blob)
+            continue
         p = os.path.join(d, rel)
         os.makedirs(os.path.dirname(p), exist_ok=True)
         with open(p, "wb") as f:

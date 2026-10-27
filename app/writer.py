@@ -11,6 +11,7 @@ gi.require_version("GdkPixbuf", "2.0")
 from gi.repository import Gdk, GdkPixbuf, Gio, GLib, GObject, Graphene, Gtk, Pango
 
 import docfmt as df
+import pdfblock
 from review import ReviewMixin
 import i18n
 from mdnotes import looks_like_markdown as md_detect
@@ -283,6 +284,7 @@ def _accent_css():
 
 
 CSS += _accent_css()
+CSS += pdfblock.CSS
 
 
 def _rect(x, y, w, h):
@@ -1682,7 +1684,9 @@ class Writer(ReviewMixin, Gtk.Box):
         self.link_url.connect("activate", lambda *_: self.apply_link())
         lrm.connect("clicked", lambda *_: self.apply_link(remove=True))
         group(ins, "Tabellen", [tbl_btn])
-        group(ins, "Illustrationen", [img_btn])
+        group(ins, "Illustrationen", [img_btn,
+                                      big_tool("󰈦", "PDF", "PDF einfügen – wird im notist-Ordner abgelegt, Ansicht auf Knopfdruck",
+                                               lambda *_: self.pick_pdf())])
         group(ins, "Hyperlinks", [self.link_btn])
         group(ins, "Seiten", [big_tool("󰛗", "Seitenumbruch", "Seitenumbruch (Strg+Enter)", lambda *_: self.insert_block("pb")),
                               big_tool("󰍴", "Linie", "Waagerechte Linie", lambda *_: self.insert_block("hr"))])
@@ -2717,6 +2721,7 @@ class Writer(ReviewMixin, Gtk.Box):
         anchor = self.buf.create_child_anchor(it)
         w = {"table": lambda: TableBlock(self, b.get("rows"), b.get("style")), "hr": lambda: RuleBlock(self),
              "pb": lambda: BreakBlock(self), "toc": lambda: TocBlock(self),
+             "pdf": lambda: pdfblock.PdfBlock(self, b),
              "fn": lambda: FootnoteMark(self, b.get("text", ""))}[b["t"]]()
         w.kind = b["t"]
         pointer_buttons(w)
@@ -2774,6 +2779,8 @@ class Writer(ReviewMixin, Gtk.Box):
                     if w.model_style():
                         tb["style"] = w.model_style()
                     out.append(tb)
+                elif w.kind == "pdf":
+                    out.append(w.model())
                 else:
                     out.append({"t": w.kind})
                 continue
@@ -2819,7 +2826,7 @@ class Writer(ReviewMixin, Gtk.Box):
         return "\n".join([txt] + extra).strip()
 
     def has_media(self):
-        return bool(self.images) or any(w.kind in ("table", "hr", "toc") for w in self.blocks.values())
+        return bool(self.images) or any(w.kind in ("table", "hr", "toc", "pdf") for w in self.blocks.values())
 
     # ================= Rückgängig =================
     def checkpoint(self):
@@ -3226,7 +3233,7 @@ class Writer(ReviewMixin, Gtk.Box):
             it.backward_char()
         return it
 
-    def insert_block(self, kind, rows=None, style=None):
+    def insert_block(self, kind, rows=None, style=None, extra=None):
         if not self.editable:
             return
         self.checkpoint()
@@ -3235,7 +3242,7 @@ class Writer(ReviewMixin, Gtk.Box):
         line = it.get_line()
         self.set_para(line, {"style": "normal", "align": "left", "list": None, "indent": 0, "spacing": 1.15})
         it = self.buf.get_iter_at_line(line)[1]
-        self.insert_anchor({"t": kind, "rows": rows, "style": style}, it)
+        self.insert_anchor({**(extra or {}), "t": kind, "rows": rows, "style": style}, it)
         it = self.buf.get_iter_at_line(line)[1]
         it.forward_char()
         if it.is_end():
@@ -3330,6 +3337,40 @@ class Writer(ReviewMixin, Gtk.Box):
                 return
             self.insert_image_file(gf.get_path(), own_line=own_line)
         dlg.open(self.win, None, done)
+
+    def pick_pdf(self):
+        dlg = Gtk.FileDialog(title="PDF einfügen")
+        f = Gtk.FileFilter()
+        f.set_name("PDF-Dateien")
+        f.add_mime_type("application/pdf")
+        store = Gio.ListStore.new(Gtk.FileFilter)
+        store.append(f)
+        dlg.set_filters(store)
+
+        def done(d, res):
+            try:
+                gf = d.open_finish(res)
+            except GLib.Error:
+                return
+            path = gf.get_path()
+            if not self.insert_pdf_file(path):
+                return
+            def trash():
+                try:
+                    gf.trash(None)
+                    self.win.notify("Original in den Papierkorb gelegt")
+                except GLib.Error as e:
+                    self.win.notify(f"Original nicht gelöscht: {e.message}")
+            pdfblock.ask_trash_original(self.win, path, trash)
+        dlg.open(self.win, None, done)
+
+    def insert_pdf_file(self, path):
+        info = pdfblock.store(path)
+        if not info:
+            self.win.notify("Das ist keine lesbare PDF-Datei")
+            return False
+        self.insert_block("pdf", extra=info)
+        return True
 
     def insert_image_file(self, path, own_line=False):
         try:

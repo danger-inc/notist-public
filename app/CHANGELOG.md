@@ -1,5 +1,9 @@
 # notist – Änderungen
 
+## 4.16.0 (2026-10-27)
+- **PDF in Words**: Einfügen → „PDF“ (oder „pdf“ im Fließend-Menü) legt die Datei sauber im notist-Ordner (data/pdfs) ab und zeigt im Dokument eine Karte mit Vorschau der ersten Seite. Knöpfe: **hier ansehen** (alle Seiten erst auf Klick in notist), **scourge-pdf** (öffnen/bearbeiten), **speichern unter**, Entfernen. Beim Teilen als .notes-Datei und in Backups ist die PDF enthalten. Nach dem Einfügen fragt notist, ob das **Original in den Papierkorb** soll, damit die Datei nicht doppelt liegt.
+- **„DE“-Knopf** in der Statusleiste sitzt jetzt direkt bei den Knöpfen rechts.
+
 ## 4.15.1 (2026-10-26)
 - **Tabellen in Notizen**: Neuer Knopf „Tabelle“ in der Notizen-Leiste (Größe wie in Words per Raster wählen). Die Tabelle steht mitten im Text, hat Zeilen/Spalten +/−, Design und Tab/Pfeile in den Zellen; sie wird mit der Notiz gespeichert und als Markdown-Tabelle exportiert (und von Markdown wieder als Tabelle erkannt).
 - **Tabellen-Design**: Die Leiste oben (+ zeile, + spalte …) ist an den -ist-Look angepasst. Die Design-Fläche liegt jetzt **rechts neben der Tabelle** (bei schmalem Fenster darunter) und verdeckt nichts mehr; die Tabelle wird dafür schmaler. Schließen mit „design“, ✕ oder Esc.

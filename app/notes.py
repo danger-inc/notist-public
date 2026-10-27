@@ -301,6 +301,7 @@ button.sheet-btn, button.pb.sheet-btn { min-width: 0; min-height: 0; padding: 1p
 .editor.trash { border-style: dashed; }
 /* Statusleiste: Knöpfe rücken an „übersetzer“ heran */
 .tstatus .ed-bar { margin: 0; }
+.tstatus .ed-bar button#ghost, button#ghost.pb.small { min-width: 0; min-height: 0; padding: 0; margin: 0 -6px 0 0; border: none; background: none; box-shadow: none; opacity: 0; }
 /* Obere Werkzeugleisten (Notizen, Words-Fließend, LaTeX) im filist-Look: flach, Trennlinie darunter, kleine umrandete Knöpfe */
 .note-tools, .writer-tools, .flowbar { background: none; border-radius: 0; padding: 2px 2px 4px 2px; margin: 2px 0 8px 0;
     border-bottom: 1px dashed alpha(@primary, 0.3); }
@@ -964,6 +965,8 @@ class Notes(Gtk.Application):
                                ("latex-to-words", lambda *_: self.convert_current("docs"), []),
                                ("to-latex", lambda *_: self.convert_current("latex"), []),
                                ("tidy", lambda *_: self.tidy_note(), []),
+                               ("reminder", lambda *_: self.open_ghost(self.rem_btn), []),
+                               ("labels", lambda *_: self.open_ghost(self.label_btn), []),
                                ("to-words", lambda *_: self.convert_current("docs"), []),
                                ("share-copy", lambda *_: self.share_copy(), []),
                                ("share-mail", lambda *_: self.share_mail(), []),
@@ -1439,11 +1442,16 @@ class Notes(Gtk.Application):
         self.lang_btn.add_css_class("pb"); self.lang_btn.add_css_class("small")
         self.lang_btn.set_cursor_from_name("pointer")
         self.lang_btn.connect("clicked", lambda *_: self.set_doc_lang("en" if self.doc_lang() == "de" else "de"))
-        bar.append(self.lang_btn)
         self.rem_btn = self.make_reminder_button()
         bar.append(self.rem_btn)
         self.label_btn = self.make_label_button()
         bar.append(self.label_btn)
+        bar.append(self.lang_btn)           # hinter den unsichtbaren Popover-Ankern, damit „DE“ nah an den Knöpfen rechts sitzt
+        for b in (self.rem_btn, self.label_btn):    # Erinnerung/Schlagwörter stehen im „Mehr“-Menü; Knöpfe bleiben nur als Anker der Popover
+            b.set_name("ghost")
+            b.set_opacity(0)
+            b.get_child().set_visible(False)
+            b.set_can_target(False)
         self.color_btn = self.make_color_button()
         bar.append(self.color_btn)
         self.share_btn = self.make_share_button()
@@ -1616,6 +1624,7 @@ class Notes(Gtk.Application):
         lab.set_label("󰓹 " + ", ".join(labels) if labels and not self.compact else "󰓹")
         lab.set_ellipsize(3)
         lab.set_max_width_chars(18)
+        self.fill_more_menu()
 
     def fill_label_chips(self):
         box = self.label_box
@@ -1694,6 +1703,11 @@ class Notes(Gtk.Application):
         self.fill_more_menu()
         return mb
 
+    def open_ghost(self, mb):
+        """Popover eines versteckten Knopfes (Erinnerung/Schlagwörter) aus dem „Mehr“-Menü öffnen."""
+        self.more_pop.popdown()
+        GLib.timeout_add(80, lambda: (mb.popup(), False)[1])
+
     def fill_more_menu(self):
         """„Mehr“-Menü im Stil des Datei-Menüs (Verlauf, Archiv, Ordner, Teilen)."""
         if not getattr(self, "more_pop", None):
@@ -1707,6 +1721,13 @@ class Notes(Gtk.Application):
             items.append(("●" if not cur else "󰉖", "Kein Ordner", "", "win.move-folder::"))
             items.append(("󰉗", "Neuer Ordner …", "", "win.new-folder-move"))
             entries.append(("In Ordner verschieben", tuple(items)))
+        n = self.current or {}
+        dt = rem.parse(n.get("reminder"))
+        rem_on = dt and not n.get("reminder_done")
+        labs = ", ".join(n.get("labels", []))
+        entries.append(("Erinnerung & Schlagwörter",
+                        (("󰂚", "Erinnerung …", rem.nice(dt) if rem_on else "", "win.reminder"),
+                         ("󰓹", "Schlagwörter …", labs[:24], "win.labels"))))
         if self.kind == "notes" and self.mode == "notes":
             entries.append(("Aufräumen", (("󰃢", "Notiz jetzt aufräumen", "", "win.tidy"),)))
         on = lambda b: ("󰄲" if b else "󰄱")
@@ -2367,6 +2388,7 @@ class Notes(Gtk.Application):
         on = dt and not n.get("reminder_done")
         self.rem_btn.get_child().set_label("󰂚 " + rem.nice(dt) if on and not self.compact else "󰂚")
         (self.rem_btn.add_css_class if on else self.rem_btn.remove_css_class)("active-rem")
+        self.fill_more_menu()
 
     def check_reminders(self):
         now = datetime.datetime.now()
