@@ -1,5 +1,8 @@
 # notist – Änderungen
 
+## 4.17.0 (2026-10-27)
+- **Wechsel-Animation**: Der Wechsel zwischen Hell und Dunkel (und zwischen Designs) läuft als Scanbalken über den ganzen Bildschirm. Alle Fenster, die Leiste und das Terminal wechseln darunter im selben Moment, hinter dem Balken steht das neue Design. An/aus und Dauer (Standard 1,5 s) stehen in der Designauswahl der Einstellungen.
+
 ## 4.16.1 (2026-10-27)
 - **„/link“** im Fließend-Menü: öffnet das Link-Fenster direkt am Cursor; steht eine Adresse in der Zwischenablage, ist sie schon eingetragen. Ist sie da, steht der Cursor gleich im „angezeigten Text“ und Enter fügt ein; sonst springt Enter aus der Adresse dorthin. Das Fenster ist im Explorer-Look.
 - **Cursor flüssiger**: Die animierte Cursor-Spur fragt die Position jetzt in jedem Bild ab (vorher alle 40 ms) – er hinkt beim Wechsel zwischen Notizen/Words (Alt+1/Alt+2) nicht mehr hinterher.
