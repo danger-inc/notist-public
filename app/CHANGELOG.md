@@ -1,5 +1,9 @@
 # notist – Änderungen
 
+## 4.16.1 (2026-10-27)
+- **„/link“** im Fließend-Menü: öffnet das Link-Fenster direkt am Cursor; steht eine Adresse in der Zwischenablage, ist sie schon eingetragen. Ist sie da, steht der Cursor gleich im „angezeigten Text“ und Enter fügt ein; sonst springt Enter aus der Adresse dorthin. Das Fenster ist im Explorer-Look.
+- **Cursor flüssiger**: Die animierte Cursor-Spur fragt die Position jetzt in jedem Bild ab (vorher alle 40 ms) – er hinkt beim Wechsel zwischen Notizen/Words (Alt+1/Alt+2) nicht mehr hinterher.
+
 ## 4.16.0 (2026-10-27)
 - **PDF in Words**: Einfügen → „PDF“ (oder „pdf“ im Fließend-Menü) legt die Datei sauber im notist-Ordner (data/pdfs) ab und zeigt im Dokument eine Karte mit Vorschau der ersten Seite. Knöpfe: **hier ansehen** (alle Seiten erst auf Klick in notist), **scourge-pdf** (öffnen/bearbeiten), **speichern unter**, Entfernen. Beim Teilen als .notes-Datei und in Backups ist die PDF enthalten. Nach dem Einfügen fragt notist, ob das **Original in den Papierkorb** soll, damit die Datei nicht doppelt liegt.
 - **„DE“-Knopf** in der Statusleiste sitzt jetzt direkt bei den Knöpfen rechts.

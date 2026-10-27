@@ -116,6 +116,14 @@ popover.wpop > contents { background-color: alpha(@background, 0.96); background
 popover.wpop.tdesign > contents, .glass popover.wpop.tdesign > contents { background-color: @background; }
 button.swatch-b { min-width: 20px; min-height: 20px; padding: 0; border-radius: 6px; border: 2px solid alpha(@foreground, 0.2); }
 button.swatch-b:hover { border-color: @foreground; }
+popover.wpop .linkpop { min-width: 300px; }
+.linkpop .lp-icon { color: @primary; min-width: 22px; font-size: 14px; }
+.linkpop entry { background: none; background-image: none; box-shadow: none; color: @foreground; min-height: 0;
+    border: 1px solid alpha(@primary, 0.35); border-radius: 4px; padding: 3px 8px; }
+.linkpop entry:focus-within { border-color: @primary; background-color: alpha(@primary, 0.12); }
+.linkpop button.lp-btn { background: none; background-image: none; box-shadow: none; border: 1px solid transparent;
+    border-radius: 4px; padding: 0 7px; min-height: 0; font-size: 12px; color: @foreground; }
+.linkpop button.lp-btn.hl { background-color: @primary; color: @on_primary; }
 .wpop-head { font-size: 12px; font-weight: 800; letter-spacing: 0.3px; color: @primary; padding: 0 2px 4px 2px;
     border-bottom: 1px solid alpha(@primary, 0.25); margin-bottom: 2px; }
 /* Menüband (Words) */
@@ -1659,29 +1667,45 @@ class Writer(ReviewMixin, Gtk.Box):
         img_item("Originalgröße", lambda: self.resize_image(None))
         img_btn, img_pop_holder["pop"] = popover_button(big_label("󰋩", "Bild"), "Bild einfügen / Größe ändern",
                                                         img_box, big=True)
-        link_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6)
+        link_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=4)
+        link_box.add_css_class("linkpop")
         h = Gtk.Label(label="LINK", xalign=0)
         h.add_css_class("wpop-head")
         link_box.append(h)
-        self.link_text = Gtk.Entry(placeholder_text="Angezeigter Text")
-        self.link_url = Gtk.Entry(placeholder_text="https://…")
-        for e in (self.link_text, self.link_url):
-            e.add_css_class("pb")
-            e.set_width_chars(28)
-            link_box.append(e)
-        lrow = Gtk.Box(spacing=6)
-        lok = Gtk.Button(label="Übernehmen")
-        lok.add_css_class("pb"); lok.add_css_class("small")
-        lrm = Gtk.Button(label="Link entfernen")
-        lrm.add_css_class("pb"); lrm.add_css_class("small")
+        self.link_text = Gtk.Entry(placeholder_text="Angezeigter Text", hexpand=True)
+        self.link_url = Gtk.Entry(placeholder_text="https://…", hexpand=True)
+        for icon, e in (("\U000F0DCE", self.link_text), ("\U000F0337", self.link_url)):
+            e.set_width_chars(30)
+            row = Gtk.Box(spacing=8)
+            ic = Gtk.Label(label=icon)
+            ic.add_css_class("lp-icon")
+            row.append(ic)
+            row.append(e)
+            link_box.append(row)
+        lrow = Gtk.Box(spacing=3, margin_top=0)
+        lok = Gtk.Button(label="󰄬 einfügen ⏎")
+        lrm = Gtk.Button(label="󰆴 entfernen")
+        for b_ in (lok, lrm):
+            b_.add_css_class("lp-btn")
+        lok.add_css_class("hl")             # Enter fügt ein: bis sich die Maus wirklich bewegt, ist nur „einfügen“ markiert
+        def pick(btn):
+            for x in (lok, lrm):
+                (x.add_css_class if x is btn else x.remove_css_class)("hl")
+        for btn in (lok, lrm):
+            mo = Gtk.EventControllerMotion()
+            mo.connect("motion", lambda *_a, btn=btn: pick(btn))      # nur echte Bewegung, nicht das Auftauchen unter der Maus
+            btn.add_controller(mo)
+        self._link_pick = lambda: pick(lok)
         lrow.append(lok)
         lrow.append(lrm)
         link_box.append(lrow)
         self.link_btn, self.link_pop = popover_button(big_label("\U000F0337", "Link"), "Link einfügen (Strg+K)",
                                                       link_box, big=True)
-        self.link_pop.connect("show", lambda *_: self.prepare_link())
+        self.link_pop.connect("show", lambda *_: (self._link_pick(), self.prepare_link()))
         lok.connect("clicked", lambda *_: self.apply_link())
-        self.link_url.connect("activate", lambda *_: self.apply_link())
+        self.link_text.connect("activate", lambda *_: self.apply_link())
+        self.link_url.connect("activate", self._link_url_enter)
+        self.link_pop.connect("closed", lambda *_: setattr(self, "_link_step", False))
         lrm.connect("clicked", lambda *_: self.apply_link(remove=True))
         group(ins, "Tabellen", [tbl_btn])
         group(ins, "Illustrationen", [img_btn,
@@ -1912,9 +1936,23 @@ class Writer(ReviewMixin, Gtk.Box):
         finally:
             self._sync = False
 
-    def open_link(self):
-        """Strg+K / Link-Knopf: das Link-Fenster hängt je nach Ansicht am Menüband oder an der Fließend-Leiste."""
+    def open_link(self, clip=False):
+        """Strg+K / Link-Knopf: das Link-Fenster hängt je nach Ansicht am Menüband oder an der Fließend-Leiste.
+        clip: „/link“ – steht eine Adresse in der Zwischenablage, ist sie schon eingetragt (nur Enter)."""
         (self.flow_link if self.flow else self.link_btn).popup()
+        if clip:
+            self._link_step = True
+            def got(cb, res):
+                try:
+                    t = (cb.read_text_finish(res) or "").strip()
+                except GLib.Error:
+                    return
+                if t and not self.link_url.get_text() and "\n" not in t and " " not in t and (
+                        "://" in t or t.startswith(("www.", "mailto:"))):
+                    self.link_url.set_text(t)
+                    self._link_step = False
+                    GLib.idle_add(lambda: self.link_text.grab_focus() and False)      # Adresse steht schon da → gleich zum angezeigten Text
+            Gdk.Display.get_default().get_clipboard().read_text_async(None, got)
 
     def _move_link_pop(self):
         want = self.flow_link if self.flow else self.link_btn
@@ -3648,7 +3686,15 @@ class Writer(ReviewMixin, Gtk.Box):
         b = self.buf.get_selection_bounds()
         self.link_text.set_text(self.buf.get_text(*b, False) if b else "")
         self.link_url.set_text(self.active.get("link", ""))
-        GLib.idle_add(lambda: self.link_url.grab_focus() and False)
+        GLib.idle_add(lambda: (not self.link_url.get_text() and self.link_url.grab_focus()) and False)
+
+    def _link_url_enter(self, *_):
+        """„/link“: Enter in der Adresse springt zum angezeigten Text, dort fügt Enter ein; sonst gleich einfügen."""
+        if getattr(self, "_link_step", False) and self.link_url.get_text().strip():
+            self._link_step = False
+            self.link_text.grab_focus()
+        else:
+            self.apply_link()
 
     def apply_link(self, remove=False):
         self.link_pop.popdown()
