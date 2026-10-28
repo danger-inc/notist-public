@@ -18,7 +18,7 @@
 three ways to write in one gtk4 app, switch with alt+1/2/3:
 
 * **notes** – quick notes with checklists, saved automatically
-* **words** – word processor: page view, styles, tables, images. opens `.docx`/`.doc`, exports to word, pdf, text, markdown, html
+* **words** – word processor: real pages, styles, tables, footnotes, images you can resize by dragging a corner or let float in front of / behind the text. opens `.docx`/`.doc`, exports to word, pdf, text, markdown, html. zoom scales paper and text together
 * **latex** – source with live pdf preview. made for beginners: templates, a guide, cheat sheet,
 command suggestions while typing and error messages in plain language
 
@@ -56,6 +56,8 @@ on windows there are no reminders while the app is closed and no background mode
 | openSUSE Tumbleweed | should work (untested) |
 | windows 10/11 | via msys2 – app start tested, installer on real windows still untested |
 
+the animated text cursor draws smoothly with gtk 4.14 or newer; older versions use a slower fallback.
+
 required is **gtk 4.12 or newer** (ubuntu 22.04 / mint 21 / debian 12 are too old – the installer says that).
 
 ## update
@@ -79,6 +81,7 @@ notist --check        # shows what is installed and what is missing
 
 ## what's in there
 
+* **fast & safe:** undo (ctrl+z) covers text, formatting, images and tables · ctrl+tab jumps to the last opened file · images are shrunk on insert (settings → words → compress images, off/light/medium/strong) so big documents stay quick
 * **backups** (daily zip, any target folder – e.g. a cloud folder) and **version history** per entry
 * **folders** (nested, e.g. `uni/math`), archive, tags, colors, search across everything, **reminders** with notifications
 * words: real pages, margins, header/footer, page numbers, table of contents, footnotes, docx/odt/pdf
