@@ -1,6 +1,8 @@
 # Mitscrollen beim Schreiben (Notizen, Words, LaTeX): Sobald sich der Text ändert – auch direkt nach Enter, nicht
 # erst beim nächsten Zeichen –, rückt die Ansicht so nach, dass der Cursor höchstens bei ~60 % der Höhe steht.
 # Damit das auch am Textende geht, bekommt die Ansicht unten eine halbe Seite Luft (set_extra).
+import time
+
 from gi.repository import GLib, Gtk
 
 LINE = 0.6          # Cursor nicht tiefer als 60 % der sichtbaren Höhe
@@ -26,6 +28,8 @@ class Follow:
         buf.connect_after("changed", lambda *_: self.queue())
 
     def queue(self):
+        if time.monotonic() < getattr(self.view, "_no_follow_until", 0):     # Rückgängig & Co. setzen die Ansicht selbst
+            return
         if self._id is None and self.enabled() and self.view.has_focus():
             self._id = GLib.idle_add(self._run)
 

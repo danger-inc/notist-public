@@ -454,6 +454,21 @@ class SettingsWindow(Gtk.Window):
                        spin(0.5, 5, w.get("margin", 2.5), lambda v: w.__setitem__("margin", round(v, 2)), digits=1, step=0.1)))
         box.append(row("Helles Papier", "Weiße Seite statt Theme-Farben",
                        switch(w, "light_paper", False, lambda on: self.app.writer.tools["paper"].set_active(on))))
+        import imgcompress
+        btn = Gtk.Button(label="Jetzt anwenden")
+        btn.add_css_class("pb")
+        btn.add_css_class("small")
+        btn.set_sensitive(w.get("img_compress", "mid") != "off")
+        btn.connect("clicked", lambda b: self.app.compress_existing_images(w.get("img_compress", "mid")))
+
+        def set_level(v):
+            w["img_compress"] = v
+            btn.set_sensitive(v != "off")
+        box.append(row("Bilder komprimieren", "Neu eingefügte Bilder werden verkleinert und neu kodiert (spart Platz, "
+                       "macht große Dokumente schneller). Gilt für Einfügen, Ziehen und Zwischenablage.",
+                       dropdown(imgcompress.NAMES, w.get("img_compress", "mid"), set_level)))
+        box.append(row("Vorhandene Bilder komprimieren", "Wendet die gewählte Stufe auf alle Words-Dokumente an. Vorher "
+                       "wird von jedem geänderten Dokument eine Version im Verlauf gesichert.", btn))
 
     def page_latex(self, box):
         L = self.prefs.setdefault("latex", {})
@@ -585,7 +600,7 @@ class SettingsWindow(Gtk.Window):
 
 SHORTCUTS = [
     ("Überall", [("Strg+N", "Neu"), ("Strg+O", "Datei öffnen"), ("Strg+F", "Im Eintrag suchen"), ("Strg+Umschalt+F", "In allen suchen"), ("Strg+Umschalt+T", "Übersetzer Deutsch ⇄ Englisch"), ("Strg+T", "Liste aufklappen (schmales Fenster)"),
-                 ("Alt+1 / 2 / 3", "Notizen / Words / LaTeX"), ("Strg+P", "Anheften"),
+                 ("Alt+1 / 2 / 3", "Notizen / Words / LaTeX"), ("Strg+Tab", "Zur zuletzt geöffneten Datei springen (nochmal = zurück)"), ("Strg+P", "Anheften"),
                  ("Strg+Umschalt+A", "Archivieren"), ("Rechtsklick auf Ordner", "Neu, Unterordner, umbenennen, auflösen"), ("Strg+,", "Einstellungen"), ("F1", "Diese Übersicht"),
                  ("Strg+W / Strg+Q", "Schließen")]),
     ("Notizen", [("Strg+B / I / U", "Fett / Kursiv / Unterstrichen"), ("Strg+Umschalt+L", "Checkliste"),

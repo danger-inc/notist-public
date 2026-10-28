@@ -1,5 +1,39 @@
 # notist – Änderungen
 
+## 4.21.0 (2026-10-28)
+- **Strg+Z ohne Springen**: Rückgängig/Wiederholen hält die Ansicht an derselben Stelle (Notizen und Words). Vorher sprang der Bildschirm kurz nach oben/unten, weil beim Neuaufbau die Seitenabstände fehlten und das Mitscrollen dazwischenfunkte. Bilder werden dabei nicht mehr jedes Mal neu dekodiert (spürbar schneller bei Dokumenten mit großen Bildern).
+- **Strg+Z überall ein Schritt**: „Formatierung löschen“ (Zeichen- und Absatzformat) und „Fußnote einfügen“ brauchten zwei Schritte – jetzt je einer. Geprüft für Tippen, Fett, Farbe, Schrift, Größe, Überschriften, Listen, Ausrichtung, Abstand, Tabellen, Fußnoten, Linie, Seitenumbruch, Inhaltsverzeichnis, Bilder (einfügen, Größe, schweben, verschieben, löschen), Markdown und in Notizen Text, Format, Checkliste, Bild, Tabelle, Löschen.
+- **Bilder komprimieren** ist jetzt standardmäßig auf „Mittel“ und zeigt beim Einfügen, wie viel gespart wurde. „Jetzt anwenden“ hat ein „Rückgängig“ im Hinweis.
+- **Speichern im Hintergrund**: Die Datei (.docx/.odt) wird bei großen Dokumenten in einem eigenen Thread geschrieben – kein Anhalten mehr beim Tippen.
+- **Willkommens-Eintrag** beim ersten Start (Kürzel, Words-Tipps; löschbar) und zwei einmalige Tipps (Bild anklicken, Strg+Tab).
+- **Englisch**: alle neuen Texte (Bild-Menü, Komprimierung, Hinweise) und ~90 bisher fehlende Beschriftungen sind übersetzt.
+- **Barrierefreiheit**: Knöpfe, die nur ein Symbol zeigen, bekommen ihren Tooltip als Beschriftung für Screenreader.
+- Die Scrollleiste neben dem Papier sieht aus wie die übrigen und verschwindet, wenn nichts zu scrollen ist.
+
+## 4.20.0 (2026-10-28)
+- **Strg+Tab**: springt zur zuletzt geöffneten Datei (egal ob Notiz, Words oder LaTeX); nochmal drücken springt zurück. Strg+Umschalt+Tab macht dasselbe. Es öffnet sich nichts darüber – der Wechsel passiert direkt. Auf Home öffnet es die zuletzt benutzte Datei; die Liste bleibt auch nach einem Neustart erhalten.
+- **Zoom in Words**: Papier und Schrift wachsen jetzt gemeinsam. Vorher wurde das Papier an die Fensterbreite geklemmt, die Schrift aber nicht mitgenommen – Zeilenumbrüche und Seitenlänge wichen dadurch vom Druck ab. Jetzt brechen die Zeilen bei jedem Zoom an derselben Stelle um.
+  - Ist das Papier breiter als das Fenster, lässt sich waagerecht scrollen.
+  - „Seitenbreite“ ist ein Modus: Der Zoom folgt der Fensterbreite, bis du selbst zoomst.
+  - Absatzabstände und Überschriften-Abstände skalieren mit.
+
+## 4.19.1 (2026-10-28)
+- **Cursor-Spur flüssig**: Der animierte Textcursor wurde als Cairo-Fläche über das ganze Fenster neu gezeichnet (bei großen Fenstern ~15–30 fps). Er ist jetzt ein kleiner GPU-Pfad – volle Bildrate, auch beim Tippen mit Spur. Gilt für alle -ist-Apps (gemeinsames glass.py).
+- **Bild-Menü**: Verschwindet beim Scrollen und beim Klick daneben (und mit Esc); Klicks im Menü selbst zählten vorher teils als Klick im Text.
+
+## 4.19.0 (2026-10-28)
+- **Bilder in Words anfassen**: Ein angeklicktes Bild hat Ziehgriffe an den vier Ecken – an einer Ecke ziehen ändert die Größe (Seitenverhältnis bleibt).
+- **Schwebende Bilder**: Im Bild-Menü gibt es „im Text“, „vor Text“ und „hinter Text“. Vor/hinter dem Text lässt sich das Bild mit der Maus frei auf der Seite verschieben (auch über den Text), an den Ecken skalieren, links/mittig/rechts ausrichten, mit Entf/Rück entfernen und mit Esc abwählen. Hinter dem Text liegende Bilder fasst man dort an, wo kein Text steht. Beim Speichern als .docx werden sie als frei positionierte Bilder (vor/hinter dem Text, ohne Umfluss) geschrieben und beim Öffnen wieder erkannt.
+- **Bilder komprimieren** (Einstellungen → Words): Stufen Aus / Leicht / Mittel / Stark verkleinern neu eingefügte Bilder (Einfügen, Ziehen, Zwischenablage). „Jetzt anwenden“ komprimiert auch alle vorhandenen Bilder in Words-Dokumenten (vorher wird eine Version im Verlauf gesichert).
+
+## 4.18.0 (2026-10-28)
+- **Words mit vielen Bildern flüssig**: Bisher fror notist bei jeder Tipp-Pause für ein bis zwei Sekunden ein (Cursor ruckelte, Löschen stockte), sobald ein Dokument große Bilder enthielt. Ursachen behoben:
+  - Speichern kodiert die Bilder nur noch einmal (vorher bei jedem Speichern komplett neu, im langsamen Python-Pfad, zweimal) – 140 ms → 7 ms.
+  - Die Datei (.docx/.odt) wird bei Dokumenten mit Bildern erst nach 4 s Tipp-Pause geschrieben (und sicher beim Wechseln/Beenden); Bilder darin werden nicht mehr nutzlos „komprimiert“.
+  - Die Wörter-/Seitenanzeige und die Seitenberechnung laufen erst in der Tipp-Pause statt bei jedem Zeichen.
+  - Schriftformat-Tags werden nicht mehr bei jedem Zeichen neu durchsucht.
+- **Weniger Speicher**: Nach dem Speichern gibt notist freien Arbeitsspeicher ans System zurück (große Dokumente ließen den Prozess sonst auf über 1 GB anwachsen). Der Versionsverlauf behält bei sehr großen Dokumenten weniger Versionen (vorher bis zu 60 × 16 MB).
+
 ## 4.17.0 (2026-10-27)
 - **Wechsel-Animation**: Der Wechsel zwischen Hell und Dunkel (und zwischen Designs) läuft als Scanbalken über den ganzen Bildschirm. Alle Fenster, die Leiste und das Terminal wechseln darunter im selben Moment, hinter dem Balken steht das neue Design. An/aus und Dauer (Standard 1,5 s) stehen in der Designauswahl der Einstellungen.
 

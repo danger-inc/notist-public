@@ -386,15 +386,26 @@ class _DocxWriter:
         h = r.get("h") or image_size(data)[1]
         cx, cy = round(w * EMU_PX), round(h * EMU_PX)
         n = self.img_n
+        graphic = (f'<wp:cNvGraphicFramePr><a:graphicFrameLocks noChangeAspect="1"/></wp:cNvGraphicFramePr>'
+                   f'<a:graphic><a:graphicData uri="{PIC}"><pic:pic>'
+                   f'<pic:nvPicPr><pic:cNvPr id="{n}" name="{name}"/><pic:cNvPicPr/></pic:nvPicPr>'
+                   f'<pic:blipFill><a:blip r:embed="{rid}"/><a:stretch><a:fillRect/></a:stretch></pic:blipFill>'
+                   f'<pic:spPr><a:xfrm><a:off x="0" y="0"/><a:ext cx="{cx}" cy="{cy}"/></a:xfrm>'
+                   f'<a:prstGeom prst="rect"><a:avLst/></a:prstGeom></pic:spPr>'
+                   f'</pic:pic></a:graphicData></a:graphic>')
+        if r.get("fl") in ("front", "back"):               # schwebend: vor/hinter dem Text, ohne Umfluss
+            back = r["fl"] == "back"
+            hx, vy = round(r.get("dx", 0) * EMU_PX), round(r.get("dy", 0) * EMU_PX)
+            return (f'<w:r><w:drawing><wp:anchor distT="0" distB="0" distL="0" distR="0" simplePos="0" '
+                    f'relativeHeight="{n if not back else 0}" behindDoc="{1 if back else 0}" locked="0" '
+                    f'layoutInCell="1" allowOverlap="1"><wp:simplePos x="0" y="0"/>'
+                    f'<wp:positionH relativeFrom="character"><wp:posOffset>{hx}</wp:posOffset></wp:positionH>'
+                    f'<wp:positionV relativeFrom="line"><wp:posOffset>{vy}</wp:posOffset></wp:positionV>'
+                    f'<wp:extent cx="{cx}" cy="{cy}"/><wp:effectExtent l="0" t="0" r="0" b="0"/><wp:wrapNone/>'
+                    f'<wp:docPr id="{n}" name="Bild {n}"/>{graphic}</wp:anchor></w:drawing></w:r>')
         return (f'<w:r><w:drawing><wp:inline distT="0" distB="0" distL="0" distR="0">'
-                f'<wp:extent cx="{cx}" cy="{cy}"/><wp:docPr id="{n}" name="Bild {n}"/>'
-                f'<wp:cNvGraphicFramePr><a:graphicFrameLocks noChangeAspect="1"/></wp:cNvGraphicFramePr>'
-                f'<a:graphic><a:graphicData uri="{PIC}"><pic:pic>'
-                f'<pic:nvPicPr><pic:cNvPr id="{n}" name="{name}"/><pic:cNvPicPr/></pic:nvPicPr>'
-                f'<pic:blipFill><a:blip r:embed="{rid}"/><a:stretch><a:fillRect/></a:stretch></pic:blipFill>'
-                f'<pic:spPr><a:xfrm><a:off x="0" y="0"/><a:ext cx="{cx}" cy="{cy}"/></a:xfrm>'
-                f'<a:prstGeom prst="rect"><a:avLst/></a:prstGeom></pic:spPr>'
-                f'</pic:pic></a:graphicData></a:graphic></wp:inline></w:drawing></w:r>')
+                f'<wp:extent cx="{cx}" cy="{cy}"/><wp:docPr id="{n}" name="Bild {n}"/>{graphic}'
+                f'</wp:inline></w:drawing></w:r>')
 
     def paragraph(self, b, num_id=None):
         ppr = []
@@ -770,7 +781,7 @@ def write_docx(blocks, path, title="", page=None):
                    '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">'
                    + "".join(rels) + "</Relationships>")
         for name, data in w.media:
-            z.writestr(f"word/media/{name}", data)
+            z.writestr(f"word/media/{name}", data, compress_type=zipfile.ZIP_STORED)   # PNG/JPEG sind schon komprimiert
 
 
 # =====================================================================
@@ -1017,7 +1028,18 @@ class _DocxReader:
             w, h = round(int(ext.get("cx")) / EMU_PX), round(int(ext.get("cy")) / EMU_PX)
         else:
             w, h = image_size(data)
-        return {"img": base64.b64encode(data).decode(), "mime": mime, "w": max(1, w), "h": max(1, h)}
+        out = {"img": base64.b64encode(data).decode(), "mime": mime, "w": max(1, w), "h": max(1, h)}
+        anc = el.find(f".//{{{WP}}}anchor")
+        if anc is not None and anc.find(f"{{{WP}}}wrapNone") is not None:       # schwebend, ohne Textumfluss
+            def off(name):
+                v = anc.find(f"{{{WP}}}{name}/{{{WP}}}posOffset")
+                try:
+                    return round(int(v.text) / EMU_PX)
+                except (AttributeError, TypeError, ValueError):
+                    return 0
+            out.update(fl="back" if anc.get("behindDoc") in ("1", "true") else "front", dx=off("positionH"),
+                       dy=off("positionV"))
+        return out
 
     def runs_of(self, el, base, link=None, out=None):
         """Läufe eines Absatzes; liefert Liste mit Läufen und dem Marker "PB" für Seitenumbrüche."""

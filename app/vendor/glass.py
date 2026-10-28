@@ -361,8 +361,34 @@ def _caret_rect(w):
     return w, x, y, h, None
 
 
-class CaretTrail(Gtk.DrawingArea):
+import gi
+
+try:                                       # GTK ≥ 4.14: Spur als GPU-Pfad zeichnen statt als Cairo-Fläche über das ganze Fenster
+    gi.require_version("Gsk", "4.0")
+    from gi.repository import Gsk
+    _CARET_PATH = hasattr(Gsk, "PathBuilder") and hasattr(Gtk.Snapshot, "append_fill")
+except (ValueError, ImportError):
+    _CARET_PATH = False
+
+
+class CaretTrail(Gtk.Widget if _CARET_PATH else Gtk.DrawingArea):
     """Liegt als durchklickbare Ebene über dem Fensterinhalt und zeichnet den Cursor des fokussierten Textfelds."""
+
+    if _CARET_PATH:
+        __gtype_name__ = "IstCaretTrail"
+
+        def do_snapshot(self, snap):
+            if self._cur is None or not self._on:
+                return
+            pb = Gsk.PathBuilder.new()
+            pb.move_to(*self._cur[0])
+            for c in self._cur[1:]:
+                pb.line_to(*c)
+            pb.close()
+            r, g, b, a = self._color
+            col = Gdk.RGBA()
+            col.red, col.green, col.blue, col.alpha = r, g, b, a
+            snap.append_fill(pb.to_path(), Gsk.FillRule.WINDING, col)
 
     def __init__(self, win):
         super().__init__(can_target=False, can_focus=False, hexpand=True, vexpand=True)
@@ -377,7 +403,8 @@ class CaretTrail(Gtk.DrawingArea):
         self._last = 0
         self._poll_id = 0
         self._color = (0.9, 0.9, 0.9, 1.0)
-        self.set_draw_func(self._draw)
+        if not _CARET_PATH:
+            self.set_draw_func(self._draw)
         self.set_opacity(0)                    # leer = unsichtbar: eine leere Vollfenster-Ebene kostet im Glas-Modus beim Scrollen Frames
         self.connect("map", self._start)
         self.connect("unmap", self._stop)
@@ -480,11 +507,24 @@ class CaretTrail(Gtk.DrawingArea):
             rgba = w.get_color()
             self._color = (rgba.red, rgba.green, rgba.blue, rgba.alpha)
         tgt = (p[1].x, p[1].y, r[3])
-        if tgt != self._tgt:
+        # Position im Text (Fensterposition + Scrollstand): bleibt sie gleich, hat nur das Scrollen den Cursor verschoben
+        # (Mitscrollen, Mausrad) → ohne Schweif mitnehmen, sonst hinkt der Streifen dem Text hinterher und ruckelt
+        key = (round(tgt[0], 1), round(tgt[1] + (sw.get_vadjustment().get_value() if sw is not None else 0), 1), tgt[2])
+        scrolled = tgt != self._tgt and key == getattr(self, "_key", None) and self._tgt is not None
+        self._key = key
+        if scrolled:
+            self._snap(tgt)
+        elif tgt != self._tgt:
             self._retarget(tgt)
         else:
             self._blink()
         return True
+
+    def _snap(self, tgt):
+        x, y, h = self._tgt = tgt
+        self._cur = [[x, y], [x + CARET_WIDTH, y], [x + CARET_WIDTH, y + h], [x, y + h]]
+        self._on, self._moved = True, time.monotonic()
+        self.queue_draw()
 
     def _retarget(self, tgt):
         now = time.monotonic()

@@ -78,6 +78,7 @@ import share  # noqa: E402
 import exports as xp  # noqa: E402
 import chrome as ch  # noqa: E402
 import swipe  # noqa: E402
+from undoview import ScrollAnchor  # noqa: E402
 import recent as rc  # noqa: E402
 import linked as lk  # noqa: E402
 import mdnotes as md  # noqa: E402
@@ -543,6 +544,16 @@ def nice_date(iso):
 ERROR_LOG = os.path.join(os.environ.get("XDG_CACHE_HOME") or os.path.expanduser("~/.cache"), "notes", "fehler.log")
 
 
+def trim_memory():
+    """Freigegebenen Arbeitsspeicher ans System zurückgeben (glibc behält große Brocken sonst: 16-MB-Dokumente
+    erzeugen bei jedem Speichern/Laden solche)."""
+    try:
+        import ctypes
+        ctypes.CDLL("libc.so.6").malloc_trim(0)
+    except Exception:  # noqa: BLE001
+        pass
+
+
 def log_error(what):
     """Fehler mit Traceback nach ~/.cache/notes/fehler.log (und stderr) – für Fehler, die die App nicht
     anhalten dürfen. Die Datei bleibt klein (ältere Hälfte fliegt bei > 200 KB)."""
@@ -668,6 +679,8 @@ class Notes(Gtk.Application):
         self.current = None
         self.mode = "notes"           # oder "trash"
         self._save_id = None
+        self._fsync_id, self._fsync_note = None, None
+        self._toast_cb = None
         self._loading = False
         self._fmt_sync = False
         self._toast_id = None
@@ -778,9 +791,10 @@ class Notes(Gtk.Application):
         getattr(glass, "bring_here", lambda w: None)(self.win)   # offen auf anderem Arbeitsbereich → hierher holen
         self.win.present()
         GLib.idle_add(self.on_shown)
-        if first:      # erster Start (z. B. bei Freunden): kurz zeigen, wo Design & Sprache stecken
-            GLib.timeout_add(900, lambda: (self.notify("Willkommen! Design und Sprache findest du in den "
-                                                       "Einstellungen (Strg+,)"), False)[-1])
+        if first:      # erster Start (z. B. bei Freunden): Willkommens-Eintrag + Hinweis auf Design & Sprache
+            GLib.timeout_add(700, lambda: (self.create_welcome(), False)[-1])
+            GLib.timeout_add(1600, lambda: (self.notify("Willkommen! Design und Sprache findest du in den "
+                                                        "Einstellungen (Strg+,)"), False)[-1])
         elif not getattr(self, "_news_told", False):
             self._news_told = True
             try:
@@ -793,6 +807,27 @@ class Notes(Gtk.Application):
             except Exception as e:
                 print("changelog:", e, file=sys.stderr)
         self.check_update()
+
+    def create_welcome(self):
+        """Allererster Start: ein Words-Eintrag, der die wichtigsten Dinge zeigt (löschbar wie jeder andere)."""
+        import welcome
+        try:
+            title, blocks = welcome.blocks(i18n.LANG)
+            store = self.stores["docs"]
+            n = store.create()
+            n["title"], n["blocks"], n["text"] = title, blocks, df.plain_text(blocks)
+            store.save(n)
+            self.jump_to("docs", n["id"])
+        except Exception:
+            log_error("Willkommens-Eintrag")
+
+    def tip_once(self, key, msg):
+        """Einen Hinweis genau einmal zeigen (merkt sich prefs["tips"])."""
+        seen = self.prefs.setdefault("tips", [])
+        if key not in seen:
+            seen.append(key)
+            self.save_prefs()
+            self.notify(msg, ms=9000)
 
     def check_update(self):
         """Neuere Version auf GitHub? → Versionsknopf „󰚰 v4.5.0 → v4.6.0“ + einmal Hinweis (Cache 6 h)."""
@@ -811,6 +846,12 @@ class Notes(Gtk.Application):
 
     def on_shown(self):
         """Fenster (wieder) sichtbar: neue Dateien im notist-Ordner aufnehmen, offene Datei ggf. neu einlesen."""
+        try:
+            import a11y
+            a11y.label_tree(self.win)
+            GLib.timeout_add(2500, lambda: (a11y.label_tree(self.win), False)[-1])     # später angelegte Teile
+        except Exception:
+            log_error("Beschriftungen")
         self.scan_files()
         n = self.current
         if n and self.view != "home" and self.mode != "trash" and not self._save_id \
@@ -978,6 +1019,7 @@ class Notes(Gtk.Application):
                                ("close", lambda *_: self.win.close(), ["<Control>q"]),
                                ("back-home", lambda *_: self.close_doc_tab() if self.view != "home" else self.leave_to_home(),
                                 ["<Control>w"]),
+                               ("last-file", lambda *_: self.jump_last(), ["<Control>Tab", "<Control><Shift>Tab"]),
                                ("tab-next", lambda *_: self.cycle_doc_tab(1), ["<Control>Page_Down"]),
                                ("tab-prev", lambda *_: self.cycle_doc_tab(-1), ["<Control>Page_Up"]),
                                ("new-folder-move", lambda *_: self.folder_prompt(self.more_btn, None, move=True), [])):
@@ -1093,7 +1135,7 @@ class Notes(Gtk.Application):
         self.toast_label = Gtk.Label(ellipsize=3, max_width_chars=44)
         self.toast_btn = Gtk.Button(label="Rückgängig")
         self.toast_btn.add_css_class("pb"); self.toast_btn.add_css_class("small")
-        self.toast_btn.connect("clicked", lambda *_: self.undo_delete())
+        self.toast_btn.connect("clicked", lambda *_: (self._toast_cb or self.undo_delete)())
         self.toast.append(self.toast_label)
         self.toast.append(self.toast_btn)
         top.append(self.toast)
@@ -1962,6 +2004,20 @@ class Notes(Gtk.Application):
         self.search.set_text("")
         self.select(n["id"])
         self.notify(f"„{self.display_title(n)}“ übernommen")
+
+    def jump_last(self):
+        """Strg+Tab: zur zuletzt geöffneten Datei springen; nochmal drücken springt zurück (wie Alt+Tab, aber ohne
+        Fenster/Überlagerung). Nutzt die gespeicherte Zuletzt-Liste, gilt also auch nach einem Neustart."""
+        n = self.current if self.view != "home" else None
+        here = f"{self.kind_of(n)}:{n['id']}" if n else None
+        for key in self.prefs.get("recent_all", []):
+            kind, _, nid = key.partition(":")
+            e = self.stores.get(kind, {}).notes.get(nid) if kind in self.stores else None
+            if key == here or not e or e.get("trashed"):
+                continue
+            self.jump_to(kind, nid)
+            return
+        self.notify("Noch keine andere Datei geöffnet")
 
     def jump_to(self, kind, nid):
         self.set_kind(kind)
@@ -2840,6 +2896,8 @@ class Notes(Gtk.Application):
                 allk.insert(0, key)
                 del allk[rc.KEEP:]
                 ch1 = True
+            if len(allk) >= 2 and self.view != "home" and "ctrl-tab" not in self.prefs.get("tips", []):
+                GLib.timeout_add(1500, lambda: (self.tip_once("ctrl-tab", "Tipp: Strg+Tab springt zwischen den zuletzt geöffneten Dateien"), False)[-1])
             if ch1:
                 self.save_prefs()
         self.queue_recent()
@@ -4128,7 +4186,50 @@ class Notes(Gtk.Application):
                     out[lk.norm(n["file"])] = (k, n)
         return out
 
-    def sync_file(self, n, kind, force=False):
+    def write_bg(self, kind, n):
+        """Datei (.docx/.odt …) in einem Hintergrund-Thread schreiben: das Zippen großer Bilder dauerte sonst Sekunden,
+        in denen Cursor und Tasten standen. Läuft schon ein Schreiben, folgt danach genau ein weiteres mit dem neuesten Stand."""
+        import threading
+        if getattr(self, "_bg_busy", False):
+            self._bg_again = (kind, n)
+            return
+        self._bg_busy = True
+        snap = dict(n)                       # Blöcke sind unveränderlich (flush ersetzt die Liste), Kopie genügt
+
+        def work():
+            err = None
+            try:
+                lk.write(kind, snap)
+            except (OSError, ValueError) as e:
+                err = e
+            GLib.idle_add(finish, err)
+
+        def finish(err):
+            self._bg_busy = False
+            if err is None:
+                n["file_mtime"] = snap.get("file_mtime")
+                n.pop("file_error", None)
+                n.pop("file_missing", None)
+            else:
+                if not n.get("file_error"):
+                    self.notify(f"Konnte nicht in {os.path.basename(n['file'])} schreiben "
+                                f"({getattr(err, 'strerror', None) or err}) – der Stand ist in notist gesichert")
+                n["file_error"] = str(err)
+            self.stores[kind].save(n, touch=False)
+            again, self._bg_again = getattr(self, "_bg_again", None), None
+            if again:
+                self.write_bg(*again)
+            return False
+        self._bg_thread = threading.Thread(target=work, daemon=True)
+        self._bg_thread.start()
+
+    def join_bg(self):
+        """Vor dem Beenden: laufendes Hintergrund-Schreiben abwarten."""
+        t = getattr(self, "_bg_thread", None)
+        if t is not None and t.is_alive():
+            t.join(20)
+
+    def sync_file(self, n, kind, force=False, bg=False):
         """Nach dem Speichern: Inhalt in die Datei schreiben (neue Einträge bekommen dabei ihre Datei)."""
         if n.get("trashed"):
             return
@@ -4167,6 +4268,10 @@ class Notes(Gtk.Application):
             # außerhalb geändert, während hier bearbeitet wurde: den fremden Stand vorher sichern
             lk.backup_original(n, again=bool(mt and n.get("file_mtime") and abs(mt - n["file_mtime"]) > 0.001))
             try:
+                if bg:
+                    self.write_bg(kind, n)
+                    return
+                self.join_bg()
                 lk.write(kind, n)
                 n.pop("file_error", None)
                 n.pop("file_missing", None)
@@ -5056,7 +5161,7 @@ class Notes(Gtk.Application):
         self._loading = True
         if self.docs:
             self.writer.load(n.get("blocks") or [df.para()], n["title"], n.get("page"))
-            view = n.get("view") or (self.writer.settings.get("last_view", "page") if is_empty(n) else "page")
+            view = n.get("view") or "flow"          # Standard: fließend; die Wahl je Dokument bleibt in n["view"]
             self.writer.set_flow(view == "flow")
         elif self.tex:
             self.latex.load(n["id"], n["text"], n["title"], n.get("source") or n.get("file"),
@@ -5247,6 +5352,8 @@ class Notes(Gtk.Application):
         self.update_note_undo()
 
     def note_restore(self, snap, offset):
+        anchor = self.__dict__.setdefault("_n_anchor", ScrollAnchor(self.text, self.note_scroll))
+        st = anchor.capture()
         self._n_restoring = True
         self._loading = True
         self.load_rich(snap)
@@ -5254,7 +5361,7 @@ class Notes(Gtk.Application):
         self._n_restoring = False
         buf = self.text.get_buffer()
         buf.place_cursor(buf.get_iter_at_offset(min(offset, buf.get_char_count())))
-        self.text.scroll_mark_onscreen(buf.get_insert())
+        anchor.restore(buf, offset, st)
         full, state = self.note_snapshot()
         self.n_last, self._n_last_full = state, full
         self.style_checks()
@@ -5531,14 +5638,98 @@ class Notes(Gtk.Application):
                     log_error("Speichern")
                 # Alles danach ist Nachbereitung: ein Fehler dort darf die Anzeige nicht auf „Speichert …“
                 # festhalten (so geschehen auf Ubuntu – gespeichert war trotzdem).
+                heavy = self.docs and self.writer.images and not force
+                if not heavy and self._fsync_id:
+                    GLib.source_remove(self._fsync_id)
+                    self._fsync_id, self._fsync_note = None, None
+                # Große Dokumente (Bilder): die Datei (.docx/.odt) erst nach einer Tipp-Pause schreiben, nicht
+                # bei jeder kurzen – das Zippen blockierte sonst den Cursor jedes Mal für Sekunden.
                 for step in (lambda: self.store.snapshot(self.current),
-                             lambda: self.sync_file(self.current, self.kind, force),
+                             (lambda: self.later_sync_file(self.current, self.kind)) if heavy
+                             else (lambda: self.sync_file(self.current, self.kind, force)),
                              self.update_meta, self.refresh_list):
                     try:
                         step()
                     except Exception:
                         log_error("Nach dem Speichern")
             self.set_saved(True if ok else "error")
+            if self.docs and self.writer.images:
+                trim_memory()
+        return False
+
+    def compress_existing_images(self, level):
+        """Bilder aller Words-Dokumente nach Stufe level verkleinern (Verlaufs-Version vorher)."""
+        import imgcompress as ic
+        if level == "off":
+            return
+        self.flush(force=True)
+        self.run_sync_file()
+        store = self.stores["docs"]
+        todo = [n for n in store.notes.values() if not n.get("trashed") and any(
+            r.get("img") for b in n.get("blocks") or () if b.get("t") == "p" for r in b["runs"])]
+        self.notify(f"Komprimiere Bilder in {len(todo)} Dokument{'en' if len(todo) != 1 else ''} …")
+        total = [0, 0]
+        done = []                                    # (Eintrag, Verlaufs-Version davor) für „Rückgängig“
+
+        def revert():
+            for n, path in done:
+                try:
+                    n["blocks"] = store.load_version(path)["blocks"]
+                    store.save(n)
+                    self.sync_file(n, "docs")
+                    if n is self.current and self.docs:
+                        self.writer.load(n["blocks"], n["title"], n.get("page"))
+                except Exception:
+                    log_error("Bilder komprimieren rückgängig")
+            trim_memory()
+            self.notify("Bilder wiederhergestellt")
+
+        def step():
+            if not todo:
+                if total[1]:
+                    self.notify(f"Fertig: {total[1]} Dokument{'e' if total[1] != 1 else ''} verkleinert, "
+                                f"{total[0] / 1e6:.1f} MB gespart", undo=revert, ms=20000)
+                else:
+                    self.notify("Nichts zu verkleinern – die Bilder sind schon klein genug")
+                trim_memory()
+                return False
+            n = todo.pop(0)
+            try:
+                snap = store.snapshot(n, force=True)
+                saved = ic.shrink_blocks(n.get("blocks"), level)
+                if saved > 0:
+                    done.append((n, snap))
+                    store.save(n)
+                    total[0] += saved
+                    total[1] += 1
+                    self.sync_file(n, "docs")
+                    if n is self.current and self.docs:
+                        self.writer.load(n["blocks"], n["title"], n.get("page"))
+            except Exception:
+                log_error("Bilder komprimieren")
+            return True
+        GLib.idle_add(step)
+
+    def later_sync_file(self, n, kind):
+        if self._fsync_note and self._fsync_note[0] is not n:
+            self.run_sync_file()                            # anderer Eintrag wartet noch: zuerst den schreiben
+        if self._fsync_id:
+            GLib.source_remove(self._fsync_id)
+        self._fsync_note = (n, kind)
+        self._fsync_id = GLib.timeout_add(4000, self.run_sync_file)
+
+    def run_sync_file(self, wait=False):
+        """Die aufgeschobene Datei-Speicherung jetzt erledigen (auch vor Wechsel/Beenden aufgerufen)."""
+        if self._fsync_id:
+            GLib.source_remove(self._fsync_id)
+        self._fsync_id = None
+        pend, self._fsync_note = self._fsync_note, None
+        if pend:
+            try:
+                self.sync_file(*pend, bg=not wait)
+            except Exception:
+                log_error("Nach dem Speichern")
+            trim_memory()
         return False
 
     def update_meta(self):
@@ -5671,6 +5862,8 @@ class Notes(Gtk.Application):
 
     def on_close(self, *_):
         self.flush()
+        self.run_sync_file(wait=True)       # aufgeschobene Datei-Speicherung nicht verlieren
+        self.join_bg()
         self.remember_pos()
         self.latex.shutdown()
         if backup.due(self.prefs):          # fällige Sicherung noch schnell erledigen
@@ -5697,13 +5890,15 @@ class Notes(Gtk.Application):
             GLib.idle_add(lambda: (self.release(), False)[1])
         return False
 
-    def notify(self, msg, undo=False):
+    def notify(self, msg, undo=False, ms=6000):
+        """Hinweis unten. undo=True: „Rückgängig“ holt die gelöschte Notiz zurück; undo=<Funktion>: ruft diese auf."""
         self.toast_label.set_label(msg)
-        self.toast_btn.set_visible(undo)
+        self._toast_cb = undo if callable(undo) else None
+        self.toast_btn.set_visible(bool(undo))
         self.toast.set_visible(True)
         if self._toast_id:
             GLib.source_remove(self._toast_id)
-        self._toast_id = GLib.timeout_add(6000, lambda: (self.toast.set_visible(False),
+        self._toast_id = GLib.timeout_add(ms, lambda: (self.toast.set_visible(False),
                                                          setattr(self, "_toast_id", None), False)[-1])
 
 

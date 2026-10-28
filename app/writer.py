@@ -11,6 +11,9 @@ gi.require_version("GdkPixbuf", "2.0")
 from gi.repository import Gdk, GdkPixbuf, Gio, GLib, GObject, Graphene, Gtk, Pango
 
 import docfmt as df
+import imgcompress
+from undoview import ScrollAnchor
+from imgobj import ImageObjects, fl_of, placeholder
 import pdfblock
 from review import ReviewMixin
 import i18n
@@ -124,6 +127,10 @@ popover.wpop .linkpop { min-width: 300px; }
 .linkpop button.lp-btn { background: none; background-image: none; box-shadow: none; border: 1px solid transparent;
     border-radius: 4px; padding: 0 7px; min-height: 0; font-size: 12px; color: @foreground; }
 .linkpop button.lp-btn.hl { background-color: @primary; color: @on_primary; }
+.imgpop button.hl { background-color: alpha(@primary, 0.3); }
+scrollbar.docbar { background: none; margin: 4px 2px; }
+scrollbar.docbar slider { min-width: 6px; border-radius: 3px; background-color: alpha(@foreground, 0.35); }
+scrollbar.docbar slider:hover { background-color: alpha(@foreground, 0.6); }
 .wpop-head { font-size: 12px; font-weight: 800; letter-spacing: 0.3px; color: @primary; padding: 0 2px 4px 2px;
     border-bottom: 1px solid alpha(@primary, 0.25); margin-bottom: 2px; }
 /* Menüband (Words) */
@@ -213,15 +220,26 @@ def rgba(hexstr, alpha=1.0):
     return c
 
 
+_PIX_CACHE = {}
+
+
 def pixel_texture(data, w, h):
-    """Bilddaten → Gdk.Texture in Anzeigegröße."""
-    loader = GdkPixbuf.PixbufLoader()
-    loader.write(data)
-    loader.close()
-    pb = loader.get_pixbuf()
+    """Bilddaten → Gdk.Texture in Anzeigegröße. Das skalierte Pixbuf wird gemerkt: Rückgängig/Zoom bauen das Dokument
+    sonst bei jedem Schritt neu auf und dekodieren dabei jedes große PNG erneut (jedes Mal eine neue Textur, denn
+    die Textur dient als Schlüssel für das Bild)."""
     w, h = max(1, round(w)), max(1, round(h))
-    if (w, h) != (pb.get_width(), pb.get_height()):
-        pb = pb.scale_simple(w, h, GdkPixbuf.InterpType.BILINEAR)
+    key = (len(data), hash(data), w, h)
+    pb = _PIX_CACHE.pop(key, None)
+    if pb is None:
+        loader = GdkPixbuf.PixbufLoader()
+        loader.write(data)
+        loader.close()
+        pb = loader.get_pixbuf()
+        if (w, h) != (pb.get_width(), pb.get_height()):
+            pb = pb.scale_simple(w, h, GdkPixbuf.InterpType.BILINEAR)
+    _PIX_CACHE[key] = pb                      # ans Ende = zuletzt benutzt
+    while len(_PIX_CACHE) > 24:
+        _PIX_CACHE.pop(next(iter(_PIX_CACHE)))
     return Gdk.Texture.new_for_pixbuf(pb)
 
 
@@ -1352,17 +1370,22 @@ class PageView(Gtk.TextView):
     def do_snapshot_layer(self, layer, snap):
         if layer == Gtk.TextViewLayer.BELOW_TEXT:
             self.w.draw_paper(snap)
+            self.w.draw_floats(snap, "back")
         else:
             self.w.draw_markers(snap)
+            self.w.draw_floats(snap, "front")
+            self.w.draw_img_sel(snap)
 
 
-class Writer(ReviewMixin, Gtk.Box):
+class Writer(ImageObjects, ReviewMixin, Gtk.Box):
     """on_change(): Text/Titel geändert. Formatierungs-Status und Ansicht verwaltet der Writer selbst."""
 
     def __init__(self, win, on_change, settings):
         super().__init__(orientation=Gtk.Orientation.VERTICAL, vexpand=True)
         self.win, self.on_change, self.settings = win, on_change, settings
         self.zoom = settings.get("zoom", 1.0)
+        self.fit = settings.get("fit", True)      # „Seitenbreite“: Zoom folgt der Fensterbreite (Papier und Schrift gemeinsam)
+        self._fit_id = None
         self.light = settings.get("light_paper", False)
         self._loading = False
         self._md_id = None               # wartende Markdown-Prüfung nach dem Tippen
@@ -1382,6 +1405,7 @@ class Writer(ReviewMixin, Gtk.Box):
         self._undo_pending = None
         self._numbers = None
         self._pages_id = None
+        self._counts_id = None
         self._measured, self._settle = None, 0
         self._verify_id, self._verify_n, self._expect = None, 0, 0
         self.search_hits = []
@@ -1435,6 +1459,7 @@ class Writer(ReviewMixin, Gtk.Box):
         click = Gtk.GestureClick()
         click.connect("released", self.on_click)
         self.view.add_controller(click)
+        self.imgobj_init()
         zoom = Gtk.EventControllerScroll(flags=Gtk.EventControllerScrollFlags.VERTICAL)
         zoom.connect("scroll", self.on_scroll)
         self.view.add_controller(zoom)
@@ -1445,9 +1470,25 @@ class Writer(ReviewMixin, Gtk.Box):
         drop.connect("drop", self.on_drop)
         self.view.add_controller(drop)
 
-        self.scroll = Gtk.ScrolledWindow(vexpand=True, hexpand=True, hscrollbar_policy=Gtk.PolicyType.NEVER)
+        # Senkrecht scrollt self.scroll (Leiste daneben, außerhalb); der äußere Bereich scrollt nur waagerecht, wenn das
+        # Papier bei großem Zoom breiter als das Fenster ist (ein TextView bricht sonst immer an der Fensterbreite um).
+        self.scroll = Gtk.ScrolledWindow(vexpand=True, hexpand=True, hscrollbar_policy=Gtk.PolicyType.NEVER,
+                                         vscrollbar_policy=Gtk.PolicyType.EXTERNAL)
         self.scroll.set_child(self.view)
-        self.scroll.add_css_class("desk")
+        self.scroll.get_vadjustment().connect("value-changed", self._img_scrolled)
+        self.hwrap = Gtk.Box(vexpand=True, hexpand=True)
+        self.hwrap.append(self.scroll)
+        self.hscroll = Gtk.ScrolledWindow(vexpand=True, hexpand=True, hscrollbar_policy=Gtk.PolicyType.AUTOMATIC,
+                                          vscrollbar_policy=Gtk.PolicyType.NEVER)
+        self.hscroll.set_child(self.hwrap)
+        self.vbar = Gtk.Scrollbar(orientation=Gtk.Orientation.VERTICAL, adjustment=self.scroll.get_vadjustment())
+        self.vbar.add_css_class("docbar")
+        vadj = self.scroll.get_vadjustment()
+        vadj.connect("changed", lambda a: self.vbar.set_visible(a.get_upper() > a.get_page_size() + 1))
+        self.scroll_box = Gtk.Box(vexpand=True, hexpand=True)
+        self.scroll_box.append(self.hscroll)
+        self.scroll_box.append(self.vbar)
+        self.scroll_box.add_css_class("desk")
         desk = Gtk.Box(vexpand=True)
         self.navrev = Gtk.Revealer(transition_type=Gtk.RevealerTransitionType.SLIDE_RIGHT,
                                    reveal_child=self.settings.get("nav", False))
@@ -1464,7 +1505,7 @@ class Writer(ReviewMixin, Gtk.Box):
         self.navrev.set_child(nav)
         self._nav_id = None
         desk.append(self.navrev)
-        desk.append(self.scroll)
+        desk.append(self.scroll_box)
         self.append(desk)
         self.append(self.build_status())
         import flow
@@ -2277,9 +2318,10 @@ class Writer(ReviewMixin, Gtk.Box):
             self.focus_text()
 
     def fit_width(self):
-        w = self.view.get_width()
-        if w > 0:
-            self.set_zoom(max(0.5, min(3.0, (w - 2 * 24) / (df.page_mm(self.page)[0] * 96 / 25.4))))
+        self.fit = True
+        self.settings["fit"] = True
+        self.update_geometry()
+        self._apply_fit()
 
     def show_stats(self):
         txt = self.plain_text()
@@ -2495,6 +2537,20 @@ class Writer(ReviewMixin, Gtk.Box):
         self.search_tag = b.create_tag("search", background_rgba=rgba("#ffb300", 0.45))
         self.make_review_tags()
         self.update_rise()
+        self.apply_spacing()
+
+    def sp(self, px):
+        """Absatzabstand in Pixeln, mit dem Zoom skaliert (sonst bliebe er beim Vergrößern gleich klein)."""
+        return round(px * self.zoom)
+
+    def apply_spacing(self):
+        self.view.set_pixels_below_lines(self.sp(8))
+        for s, props in STYLE_TAG.items():
+            t = self.buf.get_tag_table().lookup("ps:" + s)
+            if t is not None:
+                for k in ("pixels_above_lines", "pixels_below_lines"):
+                    if k in props:
+                        t.set_property(k, self.sp(props[k]))
 
     def update_rise(self):
         self.sup_tag.props.rise = round(5.5 * self.zoom * Pango.SCALE)
@@ -2538,10 +2594,21 @@ class Writer(ReviewMixin, Gtk.Box):
         return [t.props.name for t in it.get_tags() if t.props.name]
 
     def all_tags(self, prefixes=None, plain=()):
-        out = []
-        self.buf.get_tag_table().foreach(lambda t: out.append(t))
-        return [t for t in out if t.props.name and (t.props.name in plain or
-                                                    (prefixes and t.props.name.startswith(prefixes)))]
+        """Tags nach Namen filtern – gemerkt, bis die Tag-Tabelle sich ändert (wird bei jedem Tippen gebraucht)."""
+        cache = self.__dict__.get("_tag_cache")
+        if cache is None:
+            cache = self._tag_cache = {}
+            table = self.buf.get_tag_table()
+            table.connect("tag-added", lambda *_: self._tag_cache.clear())
+            table.connect("tag-removed", lambda *_: self._tag_cache.clear())
+        key = (prefixes, tuple(plain))
+        hit = cache.get(key)
+        if hit is None:
+            out = []
+            self.buf.get_tag_table().foreach(lambda t: out.append(t))
+            hit = cache[key] = [t for t in out if t.props.name and (t.props.name in plain or
+                                                                    (prefixes and t.props.name.startswith(prefixes)))]
+        return list(hit)
 
     # ================= Absätze =================
     def line_bounds(self, line):
@@ -2608,10 +2675,11 @@ class Writer(ReviewMixin, Gtk.Box):
         it = self.buf.get_iter_at_mark(self.buf.get_insert())
         return range(it.get_line(), it.get_line() + 1)
 
-    def edit_paras(self, fn):
+    def edit_paras(self, fn, checkpoint=True):
         if not self.editable:
             return
-        self.checkpoint()
+        if checkpoint:
+            self.checkpoint()
         for ln in self.selected_lines():
             a = self.para_at(ln)
             fn(a)
@@ -2687,6 +2755,7 @@ class Writer(ReviewMixin, Gtk.Box):
             if w.get_parent():
                 self.view.remove(w)
         self.blocks.clear()
+        self.clear_floats()
         self.images.clear()
         self.buf.set_text("")
         self.pending_para = None
@@ -2733,7 +2802,7 @@ class Writer(ReviewMixin, Gtk.Box):
         it = at or self.buf.get_end_iter()
         if r.get("img"):
             self.insert_image_data(base64.b64decode(r["img"]), r.get("mime"), r.get("w"), r.get("h"), it,
-                                   b64=r["img"])
+                                   b64=r["img"], fl=fl_of(r))
             return
         if r.get("fn") is not None:
             self.insert_anchor({"t": "fn", "text": r["fn"]}, it)
@@ -2916,16 +2985,40 @@ class Writer(ReviewMixin, Gtk.Box):
         self.update_undo_buttons()
         return False
 
+    def page_gaps(self):
+        """{Zeile: Pixel} der Seitenabstand-Tags (pg:<px>) – die Seitenberechnung setzt sie sonst erst Sekunden später."""
+        out = {}
+        for line in range(self.buf.get_line_count()):
+            ok, it = self.buf.get_iter_at_line(line)
+            for t in it.get_tags():
+                if t.props.name and t.props.name.startswith("pg:"):
+                    out[line] = int(t.props.name[3:])
+        return out
+
+    def reapply_page_gaps(self, gaps):
+        self._loading = True
+        n = self.buf.get_line_count()
+        for line, px in gaps.items():
+            if line < n:
+                s, e = self.line_bounds(line)
+                self.buf.apply_tag(self.page_tag(px), s, e)
+        self._loading = False
+
     def cursor_offset(self):
         return self.buf.get_iter_at_mark(self.buf.get_insert()).get_offset()
 
     def restore(self, state, offset):
         title = self.title.get_text()
         stacks = (self.undo_stack, self.redo_stack)
+        anchor = self.__dict__.setdefault("_anchor", ScrollAnchor(self.view, self.scroll))
+        st = anchor.capture()
+        gaps = self.page_gaps()                   # Seitenabstände vor dem Neuaufbau merken (sonst klappt das Layout kurz zusammen)
         self.load(state, title, self.page)
+        self.cancel_scroll_reset()                # load() würde sonst nach oben springen
+        self.reapply_page_gaps(gaps)
         self.undo_stack, self.redo_stack = stacks
         self.buf.place_cursor(self.buf.get_iter_at_offset(min(offset, self.buf.get_char_count())))
-        self.view.scroll_mark_onscreen(self.buf.get_insert())
+        anchor.restore(self.buf, offset, st)
         self.update_undo_buttons()
         self.on_change()
 
@@ -3206,14 +3299,13 @@ class Writer(ReviewMixin, Gtk.Box):
 
     def clear_format(self):
         bounds = self.buf.get_selection_bounds()
+        self.checkpoint()                       # Zeichen- und Absatzformat zusammen = ein Rückgängig-Schritt
         if bounds:
-            self.checkpoint()
             s, e = bounds
             for t in self.all_tags(CHAR_PREFIX, CHAR_PLAIN):
                 self.buf.remove_tag(t, s, e)
-            self.changed()
         self.active = {}
-        self.edit_paras(lambda a: a.update(style="normal", align="left", spacing=1.15))
+        self.edit_paras(lambda a: a.update(style="normal", align="left", spacing=1.15), checkpoint=False)
 
     # ================= Absatzformat =================
     def on_style_drop(self, drop, _):
@@ -3343,21 +3435,44 @@ class Writer(ReviewMixin, Gtk.Box):
         if not self._loading:
             self.changed()
 
-    def insert_image_data(self, data, mime=None, w=None, h=None, at=None, b64=None):
+    def insert_image_data(self, data, mime=None, w=None, h=None, at=None, b64=None, fl=None):
+        """Bild einfügen. fl = {"fl": "front"|"back", "dx", "dy"}: schwebend (Anker im Text, Bild vor/hinter dem Text)."""
         try:
             iw, ih = df.image_size(data)
             w, h = w or iw, h or ih
-            tw = self.geo["text_w"] / (self.zoom * self.geo["scale"])   # Breite in 100-%-Pixeln
-            if w > tw:
+            k = self.zoom * self.geo["scale"]
+            tw = self.geo["text_w"] / k                          # Breite in 100-%-Pixeln
+            if w > tw and not fl:
                 w, h = tw, h * tw / w
-            tex = pixel_texture(data, w * self.zoom * self.geo["scale"], h * self.zoom * self.geo["scale"])
+            tex = pixel_texture(data, w * k, h * k)
         except (GLib.Error, ZeroDivisionError):
             return False
+        if b64 is None:                                          # neues Bild: nach Einstellung verkleinern
+            level = self.settings.get("img_compress", "mid")
+            if level != "off":
+                small, m2 = imgcompress.shrink(data, level)
+                if m2:
+                    self.toast_saved(len(data), len(small))
+                    data, mime = small, m2
         it = at or self.buf.get_iter_at_mark(self.buf.get_insert())
-        self.images[tex] = {"img": b64 or base64.b64encode(data).decode(), "mime": mime or df.sniff_mime(data),
-                            "w": round(w), "h": round(h)}
+        info = {"img": b64 or base64.b64encode(data).decode(), "mime": mime or df.sniff_mime(data),
+                "w": round(w), "h": round(h)}
+        if fl:
+            ph = placeholder()
+            self.images[ph] = {**info, **fl}
+            off = it.get_offset()
+            self.buf.insert_paintable(it, ph)
+            self.add_float(ph, tex, off)
+            return True
+        self.images[tex] = info
         self.buf.insert_paintable(it, tex)
         return True
+
+    def toast_saved(self, before, after):
+        app = self.win.get_application()
+        if app is not None and hasattr(app, "notify") and before - after > 100_000:
+            f = lambda b: f"{b / 1e6:.1f} MB" if b >= 1e6 else f"{b / 1e3:.0f} KB"
+            app.notify(f"Bild verkleinert: {f(before)} → {f(after)} (Einstellungen → Words → Bilder komprimieren)")
 
     def pick_image(self, own_line=False):
         dlg = Gtk.FileDialog(title="Bild einfügen")
@@ -3460,6 +3575,7 @@ class Writer(ReviewMixin, Gtk.Box):
         for it in reversed(hits):
             tex = it.get_paintable()
             info = self.images.pop(tex)
+            self.drop_float(tex)
             data = base64.b64decode(info["img"])
             iw, ih = df.image_size(data)
             if frac is None:
@@ -3474,7 +3590,7 @@ class Writer(ReviewMixin, Gtk.Box):
             self.buf.delete(it, e)
             pos = self.buf.get_iter_at_offset(off)
             self._loading = True
-            self.insert_image_data(data, info["mime"], w, h, pos, b64=info["img"])
+            self.insert_image_data(data, info["mime"], w, h, pos, b64=info["img"], fl=fl_of(info))
             s = self.buf.get_iter_at_offset(off)
             e = self.buf.get_iter_at_offset(off + 1)
             for n in names:
@@ -3761,34 +3877,43 @@ class Writer(ReviewMixin, Gtk.Box):
         return None
 
     def build_image_pop(self):
-        pop = Gtk.Popover(has_arrow=False, autohide=True)
+        pop = Gtk.Popover(has_arrow=False, autohide=False)      # bleibt offen, damit die Eckgriffe bedienbar bleiben
         pop.add_css_class("wpop")
         pop.add_css_class("bubble")
         pop.add_css_class("imgpop")
         pop.set_position(Gtk.PositionType.TOP)
-        box = Gtk.Box(spacing=1)
+        outer = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=3)
+        row = Gtk.Box(spacing=1)
+        outer.append(row)
 
-        def btn(label, tip, cb):
+        def btn(label, tip, cb, into=None):
             b = Gtk.Button(label=label, tooltip_text=tip, focus_on_click=False)
             b.connect("clicked", lambda *_: cb())
-            box.append(b)
+            (into or row).append(b)
             return b
 
-        def sep():
+        def sep(into=None):
             x = Gtk.Box()
             x.add_css_class("bsep")
-            box.append(x)
+            (into or row).append(x)
         for pct in (25, 50, 75, 100):
             btn(f"{pct} %", f"{pct} % der Textbreite", lambda p=pct: self.image_action("size", p / 100))
         btn("1:1", "Originalgröße", lambda: self.image_action("size", None))
         sep()
         for key, icon, tip in (("left", "󰉢", "Links"), ("center", "󰉠", "Mittig"), ("right", "󰉣", "Rechts")):
             btn(icon, f"Bild {tip.lower()} ausrichten", lambda k=key: self.image_action("align", k))
-        sep()
-        btn("󰋩", "Anderes Bild wählen …", lambda: self.image_action("replace"))
-        btn("󰆏", "Bild kopieren", lambda: self.image_action("copy"))
-        btn("󰆴", "Bild entfernen", lambda: self.image_action("delete"))
-        pop.set_child(box)
+        row2 = Gtk.Box(spacing=1)
+        outer.append(row2)
+        self.wrap_btns = {}
+        for mode, label, tip in (("inline", "im Text", "Bild steht in der Zeile (wie ein Zeichen)"),
+                                 ("front", "vor Text", "Bild schwebt vor dem Text – frei verschiebbar"),
+                                 ("back", "hinter Text", "Bild schwebt hinter dem Text – frei verschiebbar")):
+            self.wrap_btns[mode] = btn(label, tip, lambda m=mode: self.image_action("wrap", m), row2)
+        sep(row2)
+        btn("󰋩", "Anderes Bild wählen …", lambda: self.image_action("replace"), row2)
+        btn("󰆏", "Bild kopieren", lambda: self.image_action("copy"), row2)
+        btn("󰆴", "Bild entfernen", lambda: self.image_action("delete"), row2)
+        pop.set_child(outer)
         pop.set_parent(self.view)
         pop.connect("closed", lambda *_: setattr(self, "_img_off", None))
         self.img_pop = pop
@@ -3796,14 +3921,32 @@ class Writer(ReviewMixin, Gtk.Box):
     def show_image_pop(self, it):
         if not getattr(self, "img_pop", None):
             self.build_image_pop()
-        e = it.copy()
-        e.forward_char()
-        self.buf.select_range(it, e)            # Bild sichtbar markiert, Größe/Löschen wirken darauf
+        tex = it.get_paintable()
+        if tex in self.float_tex:
+            rect = self.float_rect(tex)
+            if rect is None:
+                return
+            self._sel = ("f", tex)
+            mode = self.images[tex]["fl"]
+            rx, ry, rw, rh = rect
+        else:
+            e = it.copy()
+            e.forward_char()
+            self.buf.select_range(it, e)        # Bild sichtbar markiert, Größe/Löschen wirken darauf
+            self._sel = ("i", it.get_offset())
+            mode = "inline"
+            r = self.view.get_iter_location(it)
+            rx, ry, rw, rh = r.x, r.y, r.width, r.height
+        for m, b in self.wrap_btns.items():
+            (b.add_css_class if m == mode else b.remove_css_class)("hl")
         self._img_off = it.get_offset()
-        r = self.view.get_iter_location(it)
-        x, y = self.view.buffer_to_window_coords(Gtk.TextWindowType.WIDGET, r.x, r.y)
-        self.img_pop.set_pointing_to(_rect(x, y, max(1, r.width), max(1, r.height)))
+        app = self.win.get_application()
+        if app is not None and hasattr(app, "tip_once"):
+            app.tip_once("image", "Tipp: An den Ecken ziehen ändert die Größe · Bildmenü: vor Text oder hinter Text lässt das Bild schweben")
+        x, y = self.view.buffer_to_window_coords(Gtk.TextWindowType.WIDGET, int(rx), int(ry))
+        self.img_pop.set_pointing_to(_rect(x, y - 8, max(1, rw), max(1, rh) + 8))
         self.img_pop.popup()
+        self.view.queue_draw()
 
     def image_action(self, what, arg=None):
         off = getattr(self, "_img_off", None)
@@ -3816,6 +3959,30 @@ class Writer(ReviewMixin, Gtk.Box):
             return
         e = it.copy()
         e.forward_char()
+        isfloat = tex in self.float_tex
+        if what == "wrap":
+            if arg != ("inline" if not isfloat else self.images[tex]["fl"]):
+                info = self.images[tex]
+                fl = None if arg == "inline" else {"fl": arg, "dx": 0, "dy": 0}
+                if self.reinsert_image(off, info["w"], info["h"], fl):
+                    new = self.buf.get_iter_at_offset(off)
+                    self.show_image_pop(new)
+                    return
+            self.show_image_pop(it)
+            return
+        if what == "size" and isfloat:
+            info = self.images[tex]
+            tw = self.geo["text_w"] / self.pxk()
+            data = base64.b64decode(info["img"])
+            iw, ih = df.image_size(data)
+            w = iw if arg is None else tw * arg
+            self.float_resize(tex, w, w * ih / max(1, iw))
+            self.show_image_pop(it)
+            return
+        if what == "align" and isfloat:
+            self.float_align(tex, arg)
+            self.show_image_pop(it)
+            return
         if what == "size":
             self.buf.select_range(it, e)
             self.resize_image(arg)
@@ -3825,9 +3992,10 @@ class Writer(ReviewMixin, Gtk.Box):
             self.edit_paras(lambda a: a.update(align=arg))
             self.img_pop.popdown()
         elif what == "delete":
-            self.img_pop.popdown()
+            self.img_deselect()
             self.checkpoint()
             self._quiet += 1
+            self.drop_float(tex)
             self.buf.delete(it, e)
             self.images.pop(tex, None)
             self._quiet -= 1
@@ -3856,13 +4024,14 @@ class Writer(ReviewMixin, Gtk.Box):
                 self._quiet += 1
                 nx = cur.copy()
                 nx.forward_char()
+                self.drop_float(cur.get_paintable())
                 self.images.pop(cur.get_paintable(), None)
                 self.buf.delete(cur, nx)
                 pos = self.buf.get_iter_at_offset(off)
                 try:
                     iw, ih = df.image_size(data)
                     w = old["w"]
-                    self.insert_image_data(data, w=w, h=w * ih / max(1, iw), at=pos)
+                    self.insert_image_data(data, w=w, h=w * ih / max(1, iw), at=pos, fl=fl_of(old))
                 except Exception:  # noqa: BLE001
                     self.insert_image_data(data, at=pos)
                 self._quiet -= 1
@@ -4030,6 +4199,14 @@ class Writer(ReviewMixin, Gtk.Box):
             return True
         if self.win.get_focus() is not self.view:
             return False
+        if self._sel and keyval == Gdk.KEY_Escape:
+            self.img_deselect()
+            return True
+        if self._sel and self._sel[0] == "f":                  # schwebendes Bild ist gewählt
+            if keyval in (Gdk.KEY_Delete, Gdk.KEY_BackSpace):
+                self._img_off = self.buf.get_iter_at_mark(self.float_tex[self._sel[1]]["mark"]).get_offset()
+                self.image_action("delete")
+                return True
         if self.flow and self.flowx.on_key(keyval, state):
             return True
         if keyval in (Gdk.KEY_f, Gdk.KEY_F) and state & Gdk.ModifierType.CONTROL_MASK and state & Gdk.ModifierType.ALT_MASK:
@@ -4182,6 +4359,7 @@ class Writer(ReviewMixin, Gtk.Box):
         if width <= 0:
             return False
         if self.flow:
+            self.hwrap.set_size_request(-1, -1)
             g = self.flowx.geometry(width)
             self.geo = g
             self.view.set_left_margin(round(g["side"]))
@@ -4197,10 +4375,16 @@ class Writer(ReviewMixin, Gtk.Box):
         w_mm, h_mm, (t, r, b, l) = df.page_mm(self.page)
         px = 96 / 25.4
         pw, ph = w_mm * px, h_mm * px
-        page_w = min(pw * self.zoom, width - 2 * 16)
-        scale = page_w / (pw * self.zoom)
-        k = self.zoom * scale
-        side = max(16, (width - page_w) / 2)
+        if self.fit:                         # Zoom aus der Fensterbreite: erst nach kurzer Ruhe anwenden (Bilder werden neu gerechnet)
+            target = max(0.3, min(3.0, round((width - 2 * 16) / pw, 2)))
+            if abs(target - self.zoom) > 0.004 and self._fit_id is None:
+                self._fit_id = GLib.timeout_add(120, self._apply_fit)
+        page_w = pw * self.zoom              # Papier und Schrift bekommen denselben Faktor (self.zoom)
+        scale = 1.0
+        k = self.zoom
+        need = page_w + 2 * 16
+        self.hwrap.set_size_request(-1 if self.fit else round(need), -1)    # breiter als das Fenster: waagerecht scrollen
+        side = max(16, (max(width, need) - page_w) / 2)
         g = dict(side=side, page_w=page_w, page_h=ph * k, scale=scale, k=k, mt=t * px * k, mr=r * px * k,
                  mb=b * px * k, ml=l * px * k, gap=PAGE_GAP)
         g["m"] = g["ml"]
@@ -4222,8 +4406,9 @@ class Writer(ReviewMixin, Gtk.Box):
         """Seiten neu berechnen, sobald GTK das Layout fertig hat."""
         self._numbers = None
         self._lnum_cache = None
-        if self._pages_id is None:
-            self._pages_id = GLib.timeout_add(120, self.compute_pages)
+        if self._pages_id is not None:           # beim Tippen nicht alle 120 ms neu rechnen, sondern in der Pause
+            GLib.source_remove(self._pages_id)
+        self._pages_id = GLib.timeout_add(180, self.compute_pages)
         self.view.queue_draw()
 
     def content_start(self, i):
@@ -4259,7 +4444,7 @@ class Writer(ReviewMixin, Gtk.Box):
             y, h = view.get_line_yrange(it)
             cur = next((int(t.props.name[3:]) for t in it.get_tags() if t.props.name and t.props.name.startswith("pg:")), None)
             style = next((t.props.name[3:] for t in it.get_tags() if t.props.name and t.props.name.startswith("ps:")), "normal")
-            lines.append((it, h, cur, STYLE_TAG.get(style, {}).get("pixels_above_lines", 0), style))
+            lines.append((it, h, cur, self.sp(STYLE_TAG.get(style, {}).get("pixels_above_lines", 0)), style))
         total = sum(x[1] for x in lines)
         if self._verify_id:
             GLib.source_remove(self._verify_id)
@@ -4381,7 +4566,9 @@ class Writer(ReviewMixin, Gtk.Box):
             return
         self.checkpoint()
         it = self.buf.get_iter_at_mark(self.buf.get_insert())
+        self._quiet += 1                       # sonst meldet schon das Einfügen eine Änderung: ein Strg+Z zu viel
         anchor = self.insert_anchor({"t": "fn", "text": ""}, it)
+        self._quiet -= 1
         self.changed()
         self.update_toc_blocks()
         w = self.blocks[anchor]
@@ -4615,14 +4802,27 @@ class Writer(ReviewMixin, Gtk.Box):
         self.apply_paper()
         self.focus_text()
 
-    def set_zoom(self, z):
-        z = max(0.3, min(3.0, z))
+    def _apply_fit(self):
+        self._fit_id = None
+        w = self.view.get_width()
+        if self.fit and not self.flow and w > 0:
+            self.set_zoom((w - 2 * 16) / (df.page_mm(self.page)[0] * 96 / 25.4), user=False)
+        return False
+
+    def set_zoom(self, z, user=True):
+        z = round(max(0.3, min(3.0, z)), 2)
+        if user and self.fit:
+            self.fit = False
+            self.settings["fit"] = False
+            self.update_geometry()
         if abs(z - self.zoom) < 0.001:
             return
         self.zoom = z
-        self.settings["zoom"] = z
+        if user:
+            self.settings["zoom"] = z
         self.zoom_tag.props.scale = z
         self.update_rise()
+        self.apply_spacing()
         self.zoom_btn.set_label(f"{round(z * 100)} %")
         self._sync = True
         self.zoom_scale.set_value(z)
@@ -4659,8 +4859,9 @@ class Writer(ReviewMixin, Gtk.Box):
             e.forward_char()
             self.buf.delete(s, e)
             pos = self.buf.get_iter_at_offset(off)
+            self.drop_float(tex)
             self.insert_image_data(base64.b64decode(info["img"]), info["mime"], info["w"], info["h"], pos,
-                                   b64=info["img"])
+                                   b64=info["img"], fl=fl_of(info))
             s, e = self.buf.get_iter_at_offset(off), self.buf.get_iter_at_offset(off + 1)
             for n in names:
                 t = self.buf.get_tag_table().lookup(n)
@@ -4670,6 +4871,12 @@ class Writer(ReviewMixin, Gtk.Box):
         self._loading = False
 
     def update_counts(self):
+        """Wörter/Seiten-Anzeige: erst nach kurzer Tipp-Pause (der Text des ganzen Dokuments wird dafür gezählt)."""
+        if self._counts_id is None:
+            self._counts_id = GLib.timeout_add(160, self._update_counts_now)
+
+    def _update_counts_now(self):
+        self._counts_id = None
         txt = self.plain_text()
         words = len(txt.split())
         chars = len(txt.replace("￼", ""))
@@ -4682,9 +4889,10 @@ class Writer(ReviewMixin, Gtk.Box):
             pre = "" if self.flow else f"Seite {min(cur, pages)} von {pages}  ·  "
             self.count_label.set_label(f"{pre}markiert: {sw:,} von {words:,} Wörtern  ·  {sc:,} von {chars:,} Zeichen"
                                        .replace(",", "."))
-            return
+            return False
         if self.flow:
             self.count_label.set_label(f"{words:,} Wörter  ·  {chars:,} Zeichen  ·  fließend".replace(",", "."))
-            return
+            return False
         self.count_label.set_label(f"Seite {min(cur, pages)} von {pages}  ·  {words:,} Wörter  ·  {chars:,} Zeichen"
                                    .replace(",", "."))
+        return False

@@ -1,7 +1,7 @@
 # Speicher für notist: eine JSON-Datei pro Notiz in ~/.local/share/notes/data/notes/.
 # Die Felder entsprechen denen von Google Keep, damit ein späterer Abgleich (siehe sync.py)
 # nur noch übersetzen muss. Gelöschtes bleibt als "trashed" liegen, damit der Abgleich es mitbekommt.
-import datetime, glob, json, os, shutil, uuid
+import datetime, glob, json, os, re, shutil, uuid
 
 import paths
 
@@ -10,6 +10,41 @@ HISTORY = paths.HISTORY   # history/<id>/<zeit>.json
 PURGE_DAYS = 30  # so lange bleiben gelöschte Notizen im Papierkorb
 HISTORY_MINUTES = 5   # höchstens alle 5 Minuten eine Version
 HISTORY_MAX = 60      # so viele Versionen je Notiz
+
+
+_BIG = 50_000          # Zeichenketten ab dieser Länge (Bilder als base64) werden nur einmal kodiert
+_enc_cache = {}        # (Länge, Hash) → fertig kodierte JSON-Zeichenkette
+_PLACE = re.compile(r'"\\u0000IMG(\d+)\\u0000"')
+
+
+def _lift(o, big):
+    """Kopie von o, in der große Zeichenketten durch Platzhalter ersetzt sind (Original bleibt unberührt)."""
+    if isinstance(o, str):
+        if len(o) < _BIG:
+            return o
+        key = (len(o), hash(o))
+        if key not in _enc_cache:
+            _enc_cache[key] = json.dumps(o, ensure_ascii=False)
+        big.append(key)
+        return f"\0IMG{len(big) - 1}\0"
+    if isinstance(o, dict):
+        return {k: _lift(v, big) for k, v in o.items()}
+    if isinstance(o, list):
+        return [_lift(v, big) for v in o]
+    return o
+
+
+def dumps(note):
+    """Wie json.dumps(note, ensure_ascii=False), aber schnell: der C-Encoder sieht keine Bilder, bereits kodierte
+    Bilddaten kommen aus dem Zwischenspeicher (ein 16-MB-Dokument brauchte sonst bei jedem Speichern ~140 ms)."""
+    big = []
+    out = json.dumps(_lift(note, big), ensure_ascii=False)
+    if big:
+        out = _PLACE.sub(lambda m: _enc_cache[big[int(m.group(1))]], out)
+        for k in list(_enc_cache)[:-24]:          # nur die zuletzt benutzten Bilder merken (Arbeitsspeicher)
+            if k not in big:
+                del _enc_cache[k]
+    return out
 
 
 def now():
@@ -65,7 +100,7 @@ class Store:
         dest = os.path.join(self.path, note["id"] + ".json")
         tmp = dest + ".tmp"
         with open(tmp, "w") as fh:
-            json.dump(note, fh, ensure_ascii=False, indent=1)
+            fh.write(dumps(note))
         os.replace(tmp, dest)  # nie halb geschriebene Notizen
 
     def create(self):
@@ -156,9 +191,11 @@ class Store:
         dest = os.path.join(d, stamp.replace(":", "_") + ".json")
         if os.path.exists(dest):
             return None
+        data = dumps(note)
         with open(dest, "w") as fh:
-            json.dump(note, fh, ensure_ascii=False)
-        for old in files[:max(0, len(files) + 1 - HISTORY_MAX)]:
+            fh.write(data)
+        keep = HISTORY_MAX if len(data) < 2_000_000 else max(8, HISTORY_MAX * 2_000_000 // len(data))   # Bilder-Riesen: weniger Versionen
+        for old in files[:max(0, len(files) + 1 - keep)]:
             try:
                 os.remove(old)
             except OSError:
