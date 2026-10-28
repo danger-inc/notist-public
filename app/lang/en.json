@@ -437,7 +437,7 @@
  "Formel noch unvollständig": "Formula incomplete",
  "Formel noch unvollständig – oder ein Befehl fehlt": "Formula incomplete – or a command is missing",
  "Formel-Vorschau": "Formula preview",
- "Formeln": "Formulas",
+ "Formeln": "equations",
  "Formeln im Text stehen zwischen $…$, abgesetzte Formeln zwischen \\[ und \\].": "Inline formulas go between $…$, display formulas between \\[ and \\].",
  "Formeln und eigene Befehle bitte kurz prüfen": "please check formulas and custom commands briefly",
  "Fortlaufend": "Continuous",
@@ -2003,5 +2003,10 @@
  "Bild verkleinert: {} KB → {} KB (Einstellungen → Words → Bilder komprimieren)": "Image shrunk: {} KB → {} KB (Settings → Words → Compress images)",
  "Bild verkleinert: {} MB → {} KB (Einstellungen → Words → Bilder komprimieren)": "Image shrunk: {} MB → {} KB (Settings → Words → Compress images)",
  "Tipp: Strg+Tab springt zwischen den zuletzt geöffneten Dateien": "Tip: Ctrl+Tab jumps between the last opened files",
- "Tipp: An den Ecken ziehen ändert die Größe · Bildmenü: vor Text oder hinter Text lässt das Bild schweben": "Tip: drag a corner to resize · image menu: in front of text or behind text lets the image float"
+ "Tipp: An den Ecken ziehen ändert die Größe · Bildmenü: vor Text oder hinter Text lässt das Bild schweben": "Tip: drag a corner to resize · image menu: in front of text or behind text lets the image float",
+ "nicht übernommen: {}": "not imported: {}",
+ "Textfelder": "text boxes",
+ "Diagramme": "charts",
+ "SmartArt-Grafiken": "SmartArt graphics",
+ "Formen": "shapes"
 }

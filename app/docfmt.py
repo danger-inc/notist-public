@@ -1252,6 +1252,25 @@ class _DocxReader:
         return out
 
 
+LAST_LOST = []          # was der letzte read_docx_full nicht übernehmen konnte (für einen Hinweis beim Öffnen)
+
+def _lost_content(z, doc_xml):
+    """Grobe Suche im document.xml nach Inhalten, die notist nicht anzeigt."""
+    try:
+        raw = z.read("word/document.xml").decode("utf8", "ignore")
+    except KeyError:
+        return []
+    out = []
+    pairs = (("<w:txbxContent", "Textfelder"), ("<c:chart", "Diagramme"), ("<dgm:relIds", "SmartArt-Grafiken"),
+             ("<m:oMath", "Formeln"), ("<wps:wsp", "Formen"), ("<v:shape", "Formen"), ("<v:rect", "Formen"))
+    for key, name in pairs:
+        if key in raw and name not in out:
+            if key == "<wps:wsp" and "<w:txbxContent" in raw and "Textfelder" in out and raw.count("<wps:wsp") <= raw.count("<w:txbxContent"):
+                continue                      # reines Textfeld, schon gemeldet
+            out.append(name)
+    return out
+
+
 def read_docx(path):
     blocks, title, _page = read_docx_full(path)
     return blocks, title
@@ -1264,6 +1283,7 @@ def read_docx_full(path):
         if root is None:
             raise ValueError("Keine gültige DOCX-Datei (word/document.xml fehlt)")
         body = root.find(_q("body"))
+        LAST_LOST[:] = _lost_content(z, root)
         blocks = rd.blocks(body) if body is not None else []
         page = rd.page(body)
         # Leerzeilen am Ende abschneiden

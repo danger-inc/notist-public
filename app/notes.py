@@ -850,6 +850,9 @@ class Notes(Gtk.Application):
             import a11y
             a11y.label_tree(self.win)
             GLib.timeout_add(2500, lambda: (a11y.label_tree(self.win), False)[-1])     # später angelegte Teile
+            if not getattr(self, "_warmed", False) and not os.environ.get("NOTES_NO_TIMERS"):
+                self._warmed = True
+                GLib.timeout_add(4000, self.warm_images)
         except Exception:
             log_error("Beschriftungen")
         self.scan_files()
@@ -2004,6 +2007,22 @@ class Notes(Gtk.Application):
         self.search.set_text("")
         self.select(n["id"])
         self.notify(f"„{self.display_title(n)}“ übernommen")
+
+    def warm_images(self):
+        """Im Leerlauf nach dem Start: Bilder der zuletzt geöffneten Words-Dokumente schon dekodieren (Thread)."""
+        st = self.stores.get("docs")
+        if not st:
+            return False
+        done = 0
+        for key in self.prefs.get("recent_all", []):
+            kind, _, nid = key.partition(":")
+            e = st.notes.get(nid) if kind == "docs" else None
+            if e and not e.get("trashed") and e is not self.current and e.get("blocks"):
+                self.writer.prefetch_images(e["blocks"])
+                done += 1
+                if done >= 2:
+                    break
+        return False
 
     def jump_last(self):
         """Strg+Tab: zur zuletzt geöffneten Datei springen; nochmal drücken springt zurück (wie Alt+Tab, aber ohne
@@ -4154,6 +4173,9 @@ class Notes(Gtk.Application):
             extra = " (nur Text – Formatierung steckt im alten Word-Format)" + extra
         elif kind == "latex":
             extra = " – Bilder aus dem Ordner der Datei werden gefunden"
+        lost = df.LAST_LOST[:] if kind == "docs" and path.lower().endswith(".docx") else []
+        if lost:
+            extra += " – " + i18n.tr("nicht übernommen: {}", ", ".join(i18n.tr(x) for x in lost))
         self.notify(f"{os.path.basename(path)} geöffnet{extra}")
 
     def ask_kind(self, path):

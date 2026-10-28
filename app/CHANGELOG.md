@@ -1,5 +1,10 @@
 # notist – Änderungen
 
+## 4.21.1 (2026-10-28)
+- **Strg+Z springt nicht mehr**: Beim Rückgängig baut notist die Seite neu auf, und für einzelne Bilder fiel die Dokumenthöhe kurz zusammen (z. B. 7174 → 1663 px), sodass die Ansicht für ein, zwei Bilder ganz woanders stand. Jetzt bleibt währenddessen ein Standbild der Seite stehen, und die Ansicht wird erst verschoben, wenn das Layout steht.
+- **.docx öffnen**: Enthält die Datei Textfelder, Diagramme, SmartArt, Formeln oder Formen, sagt notist beim Öffnen, dass diese nicht übernommen werden.
+- **Große Bilder** werden beim Start im Hintergrund vordekodiert; das erste Öffnen eines Dokuments mit vielen Bildern blockiert dadurch weniger.
+
 ## 4.21.0 (2026-10-28)
 - **Strg+Z ohne Springen**: Rückgängig/Wiederholen hält die Ansicht an derselben Stelle (Notizen und Words). Vorher sprang der Bildschirm kurz nach oben/unten, weil beim Neuaufbau die Seitenabstände fehlten und das Mitscrollen dazwischenfunkte. Bilder werden dabei nicht mehr jedes Mal neu dekodiert (spürbar schneller bei Dokumenten mit großen Bildern).
 - **Strg+Z überall ein Schritt**: „Formatierung löschen“ (Zeichen- und Absatzformat) und „Fußnote einfügen“ brauchten zwei Schritte – jetzt je einer. Geprüft für Tippen, Fett, Farbe, Schrift, Größe, Überschriften, Listen, Ausrichtung, Abstand, Tabellen, Fußnoten, Linie, Seitenumbruch, Inhaltsverzeichnis, Bilder (einfügen, Größe, schweben, verschieben, löschen), Markdown und in Notizen Text, Format, Checkliste, Bild, Tabelle, Löschen.

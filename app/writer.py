@@ -1,7 +1,8 @@
 # Dokument-Modus von notist: ein kleines Textverarbeitungsprogramm auf Basis von Gtk.TextView.
 # Seite (A4) wird unter den Text gezeichnet, Formatierung steckt in TextTags, Tabellen/Linien/Seitenumbrüche
 # sind eingebettete Widgets. Das Dokument-Modell (Blöcke) und DOCX/PDF stecken in docfmt.py / render.py.
-import base64, copy, datetime, json, math, os, re
+import base64
+import threading, copy, datetime, json, math, os, re
 
 import gi
 gi.require_version("Gtk", "4.0")
@@ -221,6 +222,17 @@ def rgba(hexstr, alpha=1.0):
 
 
 _PIX_CACHE = {}
+_PIX_LOCK = threading.Lock()
+
+
+def _decode_pixbuf(data, w, h):
+    loader = GdkPixbuf.PixbufLoader()
+    loader.write(data)
+    loader.close()
+    pb = loader.get_pixbuf()
+    if (w, h) != (pb.get_width(), pb.get_height()):
+        pb = pb.scale_simple(w, h, GdkPixbuf.InterpType.BILINEAR)
+    return pb
 
 
 def pixel_texture(data, w, h):
@@ -229,17 +241,16 @@ def pixel_texture(data, w, h):
     die Textur dient als Schlüssel für das Bild)."""
     w, h = max(1, round(w)), max(1, round(h))
     key = (len(data), hash(data), w, h)
-    pb = _PIX_CACHE.pop(key, None)
+    with _PIX_LOCK:
+        pb = _PIX_CACHE.pop(key, None)
     if pb is None:
-        loader = GdkPixbuf.PixbufLoader()
-        loader.write(data)
-        loader.close()
-        pb = loader.get_pixbuf()
-        if (w, h) != (pb.get_width(), pb.get_height()):
-            pb = pb.scale_simple(w, h, GdkPixbuf.InterpType.BILINEAR)
-    _PIX_CACHE[key] = pb                      # ans Ende = zuletzt benutzt
-    while len(_PIX_CACHE) > 24:
-        _PIX_CACHE.pop(next(iter(_PIX_CACHE)))
+        with _PIX_LOCK:                           # gleiches Bild schon größer dekodiert (z. B. vorab im Hintergrund)? Dann nur verkleinern
+            big = next((v for kk, v in _PIX_CACHE.items() if kk[:2] == key[:2] and kk[2] >= w and kk[3] >= h), None)
+        pb = big.scale_simple(w, h, GdkPixbuf.InterpType.BILINEAR) if big is not None else _decode_pixbuf(data, w, h)
+    with _PIX_LOCK:
+        _PIX_CACHE[key] = pb                  # ans Ende = zuletzt benutzt
+        while len(_PIX_CACHE) > 40:
+            _PIX_CACHE.pop(next(iter(_PIX_CACHE)))
     return Gdk.Texture.new_for_pixbuf(pb)
 
 
@@ -1486,7 +1497,12 @@ class Writer(ImageObjects, ReviewMixin, Gtk.Box):
         vadj = self.scroll.get_vadjustment()
         vadj.connect("changed", lambda a: self.vbar.set_visible(a.get_upper() > a.get_page_size() + 1))
         self.scroll_box = Gtk.Box(vexpand=True, hexpand=True)
-        self.scroll_box.append(self.hscroll)
+        # Standbild über der Seite, solange Undo das Layout neu aufbaut (sonst blitzt die zusammengeklappte Ansicht durch)
+        self.freeze_pic = Gtk.Picture(can_target=False, visible=False, content_fit=Gtk.ContentFit.FILL)
+        ov = Gtk.Overlay(vexpand=True, hexpand=True)
+        ov.set_child(self.hscroll)
+        ov.add_overlay(self.freeze_pic)
+        self.scroll_box.append(ov)
         self.scroll_box.append(self.vbar)
         self.scroll_box.add_css_class("desk")
         desk = Gtk.Box(vexpand=True)
@@ -2798,6 +2814,40 @@ class Writer(ImageObjects, ReviewMixin, Gtk.Box):
         if src:
             GLib.source_remove(src)
 
+    def prefetch_images(self, blocks):
+        """Bilder eines (gerade verlassenen) Dokuments im Hintergrund dekodieren: kommt man zurück (Strg+Tab), steht das
+        Pixbuf schon im Zwischenspeicher und das Öffnen blockiert nicht mehr für jedes große Bild."""
+        k = self.zoom * self.geo["scale"]
+        tw = self.geo["text_w"] / k
+        jobs = []
+        for b in blocks or []:
+            for r in b.get("runs", []) if b.get("t") == "p" else []:
+                if r.get("img") and r.get("w") and r.get("h"):
+                    w, h = r["w"], r["h"]
+                    if w > tw and not fl_of(r):
+                        w, h = tw, h * tw / w
+                    jobs.append((r["img"], round(w * k), round(h * k)))
+        if not jobs:
+            return
+
+        def work():
+            for b64, w, h in jobs:
+                try:
+                    data = base64.b64decode(b64)
+                    w, h = max(1, w), max(1, h)
+                    key = (len(data), hash(data), w, h)
+                    with _PIX_LOCK:
+                        if key in _PIX_CACHE:
+                            continue
+                    pb = _decode_pixbuf(data, w, h)
+                    with _PIX_LOCK:
+                        _PIX_CACHE[key] = pb
+                        while len(_PIX_CACHE) > 40:
+                            _PIX_CACHE.pop(next(iter(_PIX_CACHE)))
+                except Exception:
+                    pass
+        threading.Thread(target=work, daemon=True).start()
+
     def insert_run(self, r, at=None):
         it = at or self.buf.get_end_iter()
         if r.get("img"):
@@ -3012,15 +3062,27 @@ class Writer(ImageObjects, ReviewMixin, Gtk.Box):
         stacks = (self.undo_stack, self.redo_stack)
         anchor = self.__dict__.setdefault("_anchor", ScrollAnchor(self.view, self.scroll))
         st = anchor.capture()
+        self.freeze()
         gaps = self.page_gaps()                   # Seitenabstände vor dem Neuaufbau merken (sonst klappt das Layout kurz zusammen)
         self.load(state, title, self.page)
         self.cancel_scroll_reset()                # load() würde sonst nach oben springen
         self.reapply_page_gaps(gaps)
         self.undo_stack, self.redo_stack = stacks
         self.buf.place_cursor(self.buf.get_iter_at_offset(min(offset, self.buf.get_char_count())))
-        anchor.restore(self.buf, offset, st)
+        anchor.restore(self.buf, offset, st, self.unfreeze)
         self.update_undo_buttons()
         self.on_change()
+
+    def freeze(self):
+        try:
+            self.freeze_pic.set_paintable(Gtk.WidgetPaintable.new(self.hscroll).get_current_image())
+            self.freeze_pic.set_visible(True)
+        except Exception:
+            pass
+
+    def unfreeze(self):
+        self.freeze_pic.set_visible(False)
+        self.freeze_pic.set_paintable(None)
 
     def undo(self):
         if self._undo_pending:

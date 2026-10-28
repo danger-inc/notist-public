@@ -25,7 +25,7 @@ class ScrollAnchor:
         adj = self.scroll.get_vadjustment()
         return self._cursor_y(self.view.get_buffer()) - adj.get_value(), adj.get_page_size()
 
-    def restore(self, buf, offset, state):
+    def restore(self, buf, offset, state, done=None):
         """Nach dem Wiederherstellen: Cursor an dieselbe Fensterstelle. War er außerhalb, wird er mit möglichst wenig
         Bewegung ins Bild geholt (nicht in die Mitte gesprungen)."""
         if self._id:
@@ -47,13 +47,18 @@ class ScrollAnchor:
             y = self._cursor_y(buf, offset)
             key = (round(adj.get_upper()), round(y))
             target = max(0, min(y - rel, adj.get_upper() - adj.get_page_size()))
-            if abs(adj.get_value() - target) > 1:
+            if st[1] > 0 and abs(adj.get_value() - target) > 1:
                 adj.set_value(target)
             st[1] = st[1] + 1 if key == st[2] else 0
             st[2] = key
+            if st[1] == 0:
+                return GLib.SOURCE_CONTINUE         # Layout noch geschätzt (y springt): nichts verschieben, erst wenn es zwei Bilder gleich bleibt
+            if st[1] == 2 and done:
+                done()                              # Layout steht: Standbild weg
             if st[1] >= self.CALM or time.monotonic() > t_end:
+                if done:
+                    done()
                 self._id = 0
                 return GLib.SOURCE_REMOVE
             return GLib.SOURCE_CONTINUE
-        step()
         self._id = self.view.add_tick_callback(step)        # jedes Bild vor dem Zeichnen, nicht erst alle 60 ms
