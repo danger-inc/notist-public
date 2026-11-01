@@ -47,6 +47,8 @@ class Follow:
 
     def _run(self):
         self._id = None
+        if time.monotonic() < getattr(self.view, "_no_follow_until", 0):     # Rückgängig stellt die Ansicht selbst her
+            return False
         self.update_extra()
         sc = self.view.get_ancestor(Gtk.ScrolledWindow)
         if sc is None:

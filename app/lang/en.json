@@ -2008,5 +2008,8 @@
  "Textfelder": "text boxes",
  "Diagramme": "charts",
  "SmartArt-Grafiken": "SmartArt graphics",
- "Formen": "shapes"
+ "Formen": "shapes",
+ "Vollbild – Esc oder F11 beendet es": "Full screen – Esc or F11 exits",
+ "Vollbild (F11)": "Full screen (F11)",
+ "Vollbild: nur Dokument und Werkzeugleiste (F11)": "Full screen: only document and toolbar (F11)"
 }

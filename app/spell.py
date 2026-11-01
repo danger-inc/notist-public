@@ -277,6 +277,8 @@ def reload_words():
 class SpellCheck:
     """Hängt sich an eine Gtk.TextView. enabled() sagt, ob gerade geprüft werden soll."""
 
+    image_hook = None            # (x, y) → True, wenn der Rechtsklick ein Bild getroffen hat und selbst behandelt wurde
+
     def __init__(self, view, enabled, skip=None):
         """skip(text) → [(anfang, ende)]: Bereiche, die nicht geprüft werden (z. B. LaTeX-Befehle)."""
         self.view, self.enabled, self.skip = view, enabled, skip
@@ -377,6 +379,8 @@ class SpellCheck:
 
     def on_right_click(self, gesture, n, x, y):
         gesture.set_state(Gtk.EventSequenceState.CLAIMED)     # GTKs eigenes Menü nicht öffnen
+        if self.image_hook and self.image_hook(x, y):          # Rechtsklick auf ein Bild = Bildeinstellungen wie Linksklick
+            return
         hit = self.word_at(x, y) if self.enabled() and self.sp.available else None
         self.target = hit
         view, buf = self.view, self.view.get_buffer()

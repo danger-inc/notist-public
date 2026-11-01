@@ -2,7 +2,9 @@
 # Seite (A4) wird unter den Text gezeichnet, Formatierung steckt in TextTags, Tabellen/Linien/Seitenumbrüche
 # sind eingebettete Widgets. Das Dokument-Modell (Blöcke) und DOCX/PDF stecken in docfmt.py / render.py.
 import base64
-import threading, copy, datetime, json, math, os, re
+import functools
+import time
+import threading, copy, datetime, json, math, os, re, sys
 
 import gi
 gi.require_version("Gtk", "4.0")
@@ -107,7 +109,7 @@ button.tcol.cur { border-color: @foreground; border-width: 2px; }
 .wtable-bar { margin-bottom: 2px; }
 .wtable-bar button.tbtn { padding: 0 8px; min-height: 20px; font-size: 11px; border-radius: 4px; }
 .tside { border: 1px solid alpha(@primary, 0.5); border-radius: 6px; padding: 4px 8px; background-color: alpha(@background, 0.6); }
-.whr { min-height: 2px; background-color: alpha(@foreground, 0.4); margin: 9px 0; }
+.whr { background-color: alpha(@foreground, 0.4); }
 .light .whr { background-color: rgba(0,0,0,0.45); }
 .wpb { font-size: 10px; font-weight: 800; letter-spacing: 2px; color: alpha(@foreground, 0.45);
     border-top: 2px dashed alpha(@foreground, 0.3); padding-top: 2px; margin: 8px 0; }
@@ -223,6 +225,12 @@ def rgba(hexstr, alpha=1.0):
 
 _PIX_CACHE = {}
 _PIX_LOCK = threading.Lock()
+PIX_FAST = False          # Pinch-Zoom: Bilder nur grob aus dem schon vorhandenen skalieren (kein erneutes Dekodieren)
+
+
+@functools.lru_cache(maxsize=24)
+def _unb64(img):
+    return base64.b64decode(img)
 
 
 def _decode_pixbuf(data, w, h):
@@ -241,6 +249,11 @@ def pixel_texture(data, w, h):
     die Textur dient als Schlüssel für das Bild)."""
     w, h = max(1, round(w)), max(1, round(h))
     key = (len(data), hash(data), w, h)
+    if PIX_FAST:
+        with _PIX_LOCK:
+            src = max((v for kk, v in _PIX_CACHE.items() if kk[:2] == key[:2]), key=lambda v: v.get_width(), default=None)
+        if src is not None:
+            return Gdk.Texture.new_for_pixbuf(src.scale_simple(w, h, GdkPixbuf.InterpType.NEAREST))
     with _PIX_LOCK:
         pb = _PIX_CACHE.pop(key, None)
     if pb is None:
@@ -1246,10 +1259,14 @@ class TableBlock(Gtk.Box):
 class RuleBlock(Gtk.Box):
     def __init__(self, writer):
         super().__init__()
+        self.writer = writer
         self.add_css_class("whr")
 
     def set_width(self, w):
-        self.set_size_request(max(80, int(w)), 2)
+        k = getattr(self.writer, "zoom", 1.0)      # Höhe und Rand skalieren mit dem Zoom, sonst bricht die Seite je Zoomstufe anders um
+        self.set_margin_top(round(9 * k))
+        self.set_margin_bottom(round(9 * k))
+        self.set_size_request(max(80, int(w)), max(1, round(2 * k)))
 
 
 class BreakBlock(Gtk.Label):
@@ -1416,6 +1433,8 @@ class Writer(ImageObjects, ReviewMixin, Gtk.Box):
         self._undo_pending = None
         self._numbers = None
         self._pages_id = None
+        self._quick_id = None
+        self._sticky, self._breaks = False, None     # Seitenumbrüche beim reinen Zoomen beibehalten
         self._counts_id = None
         self._measured, self._settle = None, 0
         self._verify_id, self._verify_n, self._expect = None, 0, 0
@@ -1461,8 +1480,9 @@ class Writer(ImageObjects, ReviewMixin, Gtk.Box):
         self.buf.connect_after("insert-text", self.after_insert)
         self.buf.connect("changed", self.on_buffer_changed)
         self.buf.connect("mark-set", self.on_mark_set)
-        self.buf.connect("delete-range", lambda b, s, e: self.track_delete(b, s, e))
-        self.buf.connect_after("delete-range", lambda *_: self.invalidate())
+        self.buf.connect("delete-range", lambda b, s, e: (self.track_delete(b, s, e),
+                                                          setattr(self, "_del_nl", s.get_line() != e.get_line())))
+        self.buf.connect_after("delete-range", lambda *_: (self.invalidate(), self._del_nl and self.quick_pages_soon()))
         k = Gtk.EventControllerKey()
         k.set_propagation_phase(Gtk.PropagationPhase.CAPTURE)
         k.connect("key-pressed", self.on_key)
@@ -1497,6 +1517,14 @@ class Writer(ImageObjects, ReviewMixin, Gtk.Box):
         vadj = self.scroll.get_vadjustment()
         vadj.connect("changed", lambda a: self.vbar.set_visible(a.get_upper() > a.get_page_size() + 1))
         self.scroll_box = Gtk.Box(vexpand=True, hexpand=True)
+        # Pinch-Zoom (Touchscreen und Touchpad): Zoom folgt den Fingern, die Ansicht bleibt an derselben Textstelle
+        pinch = Gtk.GestureZoom(propagation_phase=Gtk.PropagationPhase.CAPTURE)
+        pinch.connect("begin", self.pinch_begin)
+        pinch.connect("scale-changed", self.pinch_changed)
+        pinch.connect("end", self.pinch_end)
+        pinch.connect("cancel", self.pinch_end)
+        self.scroll_box.add_controller(pinch)
+        self._pinch_id, self._pinch = None, None
         # Standbild über der Seite, solange Undo das Layout neu aufbaut (sonst blitzt die zusammengeklappte Ansicht durch)
         self.freeze_pic = Gtk.Picture(can_target=False, visible=False, content_fit=Gtk.ContentFit.FILL)
         ov = Gtk.Overlay(vexpand=True, hexpand=True)
@@ -2568,6 +2596,22 @@ class Writer(ImageObjects, ReviewMixin, Gtk.Box):
                     if k in props:
                         t.set_property(k, self.sp(props[k]))
 
+    def update_tabs(self):
+        """Tabstopps (8 Leerzeichen) wachsen mit dem Zoom – sonst brechen Zeilen mit Tabs bei kleinem Zoom um und die
+        Seiten laufen je Zoomstufe anders."""
+        try:
+            base = self.view.create_pango_layout(" " * 8).get_pixel_size()[0] if getattr(self, "_tab_base", None) is None \
+                else self._tab_base
+            self._tab_base = base
+            if base <= 0:
+                return
+            tabs = Pango.TabArray.new(40, True)
+            for i in range(40):
+                tabs.set_tab(i, Pango.TabAlign.LEFT, round((i + 1) * base * self.zoom))
+            self.view.set_tabs(tabs)
+        except Exception as e:  # noqa: BLE001 – Optik, darf nichts blockieren
+            print("update_tabs:", e, file=sys.stderr)
+
     def update_rise(self):
         self.sup_tag.props.rise = round(5.5 * self.zoom * Pango.SCALE)
         self.sub_tag.props.rise = round(-2.5 * self.zoom * Pango.SCALE)
@@ -2716,6 +2760,8 @@ class Writer(ImageObjects, ReviewMixin, Gtk.Box):
         if self._loading:
             return
         self.track_inserted(loc, text)
+        if "\n" in text:
+            self.quick_pages_soon()
         if length == 1 and text in " *_~`" and self.settings.get("markdown", True) and not self._md_id:
             ln = loc.get_line()
             self._md_id = GLib.idle_add(lambda: self.md_live(ln, text))
@@ -2765,6 +2811,7 @@ class Writer(ImageObjects, ReviewMixin, Gtk.Box):
 
     def load(self, blocks, title, page=None):
         self.page = df.norm_page(page, self.default_margin_mm())
+        self._sticky, self._breaks = False, None
         self._loading = True
         self.title.set_text(title or "")
         for anchor, w in list(self.blocks.items()):
@@ -3005,6 +3052,7 @@ class Writer(ImageObjects, ReviewMixin, Gtk.Box):
         """Nach jeder Änderung: Speichern anstoßen und Rückgängig-Schritt bündeln."""
         if self._loading:
             return
+        self._sticky = False
         self.invalidate()
         self.update_counts()
         self.on_change()
@@ -3077,10 +3125,12 @@ class Writer(ImageObjects, ReviewMixin, Gtk.Box):
         try:
             self.freeze_pic.set_paintable(Gtk.WidgetPaintable.new(self.hscroll).get_current_image())
             self.freeze_pic.set_visible(True)
+            self.hscroll.set_opacity(0)          # sonst scheint der neu aufgebaute Text durch das (durchsichtige) Standbild
         except Exception:
             pass
 
     def unfreeze(self):
+        self.hscroll.set_opacity(1)
         self.freeze_pic.set_visible(False)
         self.freeze_pic.set_paintable(None)
 
@@ -4100,6 +4150,17 @@ class Writer(ImageObjects, ReviewMixin, Gtk.Box):
                 self.changed()
             dlg.open(self.win, None, done)
 
+    def image_context(self, x, y):
+        """Rechtsklick auf ein Bild: dieselben Bildeinstellungen wie beim Linksklick."""
+        if not self.editable:
+            return False
+        it = self.image_at(x, y)
+        if it is None:
+            return False
+        self.view.grab_focus()
+        self.show_image_pop(it)
+        return True
+
     def on_click(self, gesture, n, x, y):
         if self.painter:
             GLib.idle_add(lambda: (self.paint_format(), False)[1])
@@ -4340,6 +4401,91 @@ class Writer(ImageObjects, ReviewMixin, Gtk.Box):
                 return True
         return False
 
+    def pinch_begin(self, gesture, seq):
+        self._pinch_seq = getattr(self, "_pinch_seq", 0) + 1      # laufendes Festhalten beenden
+        self._pinch = {"z0": self.zoom, "target": self.zoom}
+
+    def pinch_changed(self, gesture, scale):
+        p = self._pinch
+        if p is None:
+            return
+        p["target"] = max(0.3, min(3.0, p["z0"] * scale))
+        if self._pinch_id is None:               # Neuaufbau ist teuer (Bilder, Seiten): höchstens ~20× pro Sekunde
+            self._pinch_id = GLib.timeout_add(50, self.pinch_apply)
+
+    def pinch_end(self, gesture, seq):
+        if self._pinch_id is not None:
+            GLib.source_remove(self._pinch_id)
+            self._pinch_id = None
+            self.pinch_apply()
+        if self._pinch is not None and self.images and abs(self._pinch["target"] - self._pinch["z0"]) > 0.01:
+            GLib.timeout_add(120, self.pinch_sharpen)      # nach dem Loslassen: Bilder wieder in voller Schärfe
+        self._pinch = None
+
+    def pinch_sharpen(self):
+        if self._pinch is not None:                         # inzwischen ein neuer Pinch
+            return False
+        adj = self.scroll.get_vadjustment()
+        v = adj.get_value()
+        it, top = self.view.get_line_at_y(int(v))
+        line, rel = it.get_line(), (v - top) / max(0.01, self.zoom)
+        self.freeze()                                       # Bilder neu einsetzen lässt das Layout kurz zusammenklappen
+        self.rescale_images()
+        seq = getattr(self, "_pinch_seq", 0)               # nicht erhöhen: das Festhalten aus pinch_apply läuft weiter
+        n = [0]
+
+        def hold(widget=None, clock=None):
+            ok, i2 = self.buf.get_iter_at_line(line)
+            y, _h = self.view.get_line_yrange(i2)
+            want = max(0, min(y + rel * self.zoom, adj.get_upper() - adj.get_page_size()))
+            if abs(adj.get_value() - want) > 1:
+                adj.set_value(want)
+            n[0] += 1
+            if seq != self._pinch_seq or n[0] > 14:
+                self.unfreeze()
+                return GLib.SOURCE_REMOVE
+            return GLib.SOURCE_CONTINUE
+        hold()
+        self.view.add_tick_callback(hold)
+        return False
+
+    def pinch_apply(self):
+        self._pinch_id = None
+        p = self._pinch
+        if p is None:
+            return False
+        z_old, z = self.zoom, round(p["target"], 2)
+        if abs(z - z_old) < 0.01:
+            return False
+        adj = self.scroll.get_vadjustment()
+        v = adj.get_value()
+        it, top = self.view.get_line_at_y(int(v))
+        line, rel = it.get_line(), (v - top) / z_old
+        global PIX_FAST
+        PIX_FAST = True
+        try:
+            self.set_zoom(z)
+        finally:
+            PIX_FAST = False
+        self._pinch_seq = seq = getattr(self, "_pinch_seq", 0) + 1
+        t0 = time.monotonic()
+
+        def hold(widget=None, clock=None):          # Layout und Seitenumbrüche stehen erst nach und nach: Textstelle oben festhalten
+            if seq != self._pinch_seq:
+                return GLib.SOURCE_REMOVE
+            ok, i2 = self.buf.get_iter_at_line(line)
+            y, _h = self.view.get_line_yrange(i2)
+            want = max(0, min(y + rel * self.zoom, adj.get_upper() - adj.get_page_size()))
+            if abs(adj.get_value() - want) > 1:
+                adj.set_value(want)
+            busy = self._pages_id is not None or self._verify_id is not None or self._quick_id is not None
+            if time.monotonic() - t0 > 3.0 or (not busy and time.monotonic() - t0 > 0.3 and self._pinch is None):
+                return GLib.SOURCE_REMOVE
+            return GLib.SOURCE_CONTINUE
+        hold()
+        self.view.add_tick_callback(hold)
+        return False
+
     def on_scroll(self, ctrl, dx, dy):
         if ctrl.get_current_event_state() & Gdk.ModifierType.CONTROL_MASK:
             self.step_zoom(-1 if dy > 0 else 1)
@@ -4371,6 +4517,8 @@ class Writer(ImageObjects, ReviewMixin, Gtk.Box):
         return len(t.split()), len(t)
 
     def on_buffer_changed(self, buf):
+        if not self._loading:
+            self._sticky = False
         if not self._loading and not self._quiet:
             self._numbers = None
             self.changed()
@@ -4420,6 +4568,7 @@ class Writer(ImageObjects, ReviewMixin, Gtk.Box):
         width = self.view.get_width()
         if width <= 0:
             return False
+        self.update_tabs()
         if self.flow:
             self.hwrap.set_size_request(-1, -1)
             g = self.flowx.geometry(width)
@@ -4485,7 +4634,21 @@ class Writer(ImageObjects, ReviewMixin, Gtk.Box):
             t = self.buf.create_tag(name, pixels_above_lines=px)
         return t
 
-    def compute_pages(self):
+    def quick_pages_soon(self):
+        """Nach Zeilenumbruch: Seitenumbruch gleich neu rechnen (vor dem nächsten Bild), nicht erst nach der Tipp-Pause –
+        sonst steht die neue Zeile ~0,4 s auf der falschen Seite und die Ansicht springt hinterher."""
+        if self._quick_id is None and not self.flow and not self._loading:
+            self._quick_id = GLib.idle_add(self._quick_pages, priority=GLib.PRIORITY_HIGH_IDLE)
+
+    def _quick_pages(self):
+        self._quick_id = None
+        try:
+            self.compute_pages(quick=True)
+        except Exception as e:  # noqa: BLE001 – darf das Tippen nie stören; die normale Berechnung folgt ohnehin
+            print("quick_pages:", e, file=sys.stderr)
+        return GLib.SOURCE_REMOVE
+
+    def compute_pages(self, quick=False):
         """Echte Seiten: Absätze, die nicht mehr auf die Seite passen, rutschen auf die nächste. Dafür bekommt der
         erste Absatz einer Seite einen Abstand nach oben (Tag pg:<px>). GTK misst Zeilen erst nach und nach im
         Hintergrund – deshalb wird gerechnet, sobald die Höhen stabil sind, und nur Geänderte werden neu gesetzt."""
@@ -4508,19 +4671,23 @@ class Writer(ImageObjects, ReviewMixin, Gtk.Box):
             style = next((t.props.name[3:] for t in it.get_tags() if t.props.name and t.props.name.startswith("ps:")), "normal")
             lines.append((it, h, cur, self.sp(STYLE_TAG.get(style, {}).get("pixels_above_lines", 0)), style))
         total = sum(x[1] for x in lines)
-        if self._verify_id:
+        if self._verify_id and not quick:
             GLib.source_remove(self._verify_id)
             self._verify_id = None
-        if total != self._measured and self._settle < 15:      # noch nicht fertig gemessen: gleich nochmal
+        if not quick and total != self._measured and self._settle < 15:      # noch nicht fertig gemessen: gleich nochmal
             self._measured = total
             self._settle += 1
             self._pages_id = GLib.timeout_add(150, self.compute_pages)
             return False
-        self._settle = 0
+        if not quick:
+            self._settle = 0
         forced = set()
         for anchor, w in self.blocks.items():
             if w.kind == "pb" and not anchor.get_deleted():
                 forced.add(self.anchor_iter(anchor).get_line() + 1)
+        sig = (n_lines, repr(df.page_mm(self.page)))
+        sticky = bool(self._sticky and self._breaks is not None and self._breaks[0] == sig)
+        sticky_breaks = self._breaks[1] if sticky else ()
         starts, p, y = [0.0], 0, 0.0
         want = {}
         prev = None                     # (zeile, y, höhe, abstand, stil, seite) der vorigen Zeile
@@ -4528,10 +4695,14 @@ class Writer(ImageObjects, ReviewMixin, Gtk.Box):
         for line, (it, h, cur, above, style) in enumerate(lines):
             nat = h - ((cur - above) if cur is not None else 0)       # Höhe ohne unseren Seiten-Abstand
             end = self.content_start(p) + g["body_h"]
-            if line in forced or (y + nat > end + 0.5 and y > self.content_start(p) + 1 and nat <= g["body_h"] + above):
+            if sticky:                          # nur gezoomt: dieselben Seitenumbrüche wie vorher (Rundung je Zoomstufe darf sie nicht verschieben)
+                auto = line in sticky_breaks
+            else:
+                auto = y + nat > end + 0.5 and y > self.content_start(p) + 1 and nat <= g["body_h"] + above
+            if line in forced or auto:
                 p += 1
                 starts.append(self.content_start(p))
-                if line not in forced and prev and prev[4] in ("h1", "h2", "h3") and prev[5] == p - 1 \
+                if not sticky and line not in forced and prev and prev[4] in ("h1", "h2", "h3") and prev[5] == p - 1 \
                         and prev[1] > self.content_start(p - 1) + 1 and prev[0] not in want:
                     # Überschrift nicht allein unten stehen lassen: sie wandert mit auf die neue Seite
                     pl, py, pnat, pabove = prev[0], prev[1], prev[2], prev[3]
@@ -4558,9 +4729,14 @@ class Writer(ImageObjects, ReviewMixin, Gtk.Box):
                 p += 1
                 starts.append(self.content_start(p))
         changed = False
+        adj = self.scroll.get_vadjustment()
+        top_line = self.view.get_line_at_y(int(adj.get_value()))[0].get_line()
+        shift = 0                                  # Seitenabstände oberhalb der sichtbaren Stelle → Ansicht gleich mitnehmen
         for line, (it, h, cur, above, style) in enumerate(lines):
             if want.get(line) == cur:
                 continue
+            if line < top_line:
+                shift += (want.get(line) or 0) - (cur or 0)
             ok, s_ = buf.get_iter_at_line(line)
             e_ = s_.copy()
             if not e_.ends_line():
@@ -4572,10 +4748,16 @@ class Writer(ImageObjects, ReviewMixin, Gtk.Box):
             if line in want:
                 buf.apply_tag(self.page_tag(want[line]), s_, e_)
             changed = True
+        self._breaks = (sig, set(want))
         if changed:
             self._measured = None
+            if shift:
+                adj.set_value(max(0, adj.get_value() + shift))
         self.pages = starts
         self.line_page = page_of
+        if quick:
+            view.queue_draw()
+            return False
         last_end = self.content_start(len(starts) - 1) + g["body_h"]
         self.view.set_bottom_margin(round(max(0, last_end - y) + g["mb"] + DESK + self.extra_bottom))
         self.update_counts()
@@ -4883,7 +5065,9 @@ class Writer(ImageObjects, ReviewMixin, Gtk.Box):
         if user:
             self.settings["zoom"] = z
         self.zoom_tag.props.scale = z
+        self._sticky = self._breaks is not None
         self.update_rise()
+        self.update_tabs()
         self.apply_spacing()
         self.zoom_btn.set_label(f"{round(z * 100)} %")
         self._sync = True
@@ -4922,7 +5106,7 @@ class Writer(ImageObjects, ReviewMixin, Gtk.Box):
             self.buf.delete(s, e)
             pos = self.buf.get_iter_at_offset(off)
             self.drop_float(tex)
-            self.insert_image_data(base64.b64decode(info["img"]), info["mime"], info["w"], info["h"], pos,
+            self.insert_image_data(_unb64(info["img"]), info["mime"], info["w"], info["h"], pos,
                                    b64=info["img"], fl=fl_of(info))
             s, e = self.buf.get_iter_at_offset(off), self.buf.get_iter_at_offset(off + 1)
             for n in names:

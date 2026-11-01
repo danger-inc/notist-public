@@ -544,6 +544,18 @@ def nice_date(iso):
 ERROR_LOG = os.path.join(os.environ.get("XDG_CACHE_HOME") or os.path.expanduser("~/.cache"), "notes", "fehler.log")
 
 
+def limit_arenas():
+    """glibc legt pro Thread eine eigene Speicher-Arena an und gibt sie kaum zurück – zwei genügen."""
+    try:
+        import ctypes
+        ctypes.CDLL("libc.so.6").mallopt(-8, 2)       # M_ARENA_MAX
+    except Exception:  # noqa: BLE001
+        pass
+
+
+limit_arenas()
+
+
 def trim_memory():
     """Freigegebenen Arbeitsspeicher ans System zurückgeben (glibc behält große Brocken sonst: 16-MB-Dokumente
     erzeugen bei jedem Speichern/Laden solche)."""
@@ -1022,6 +1034,7 @@ class Notes(Gtk.Application):
                                ("close", lambda *_: self.win.close(), ["<Control>q"]),
                                ("back-home", lambda *_: self.close_doc_tab() if self.view != "home" else self.leave_to_home(),
                                 ["<Control>w"]),
+                               ("fullscreen", lambda *_: self.set_zen(not self.zen), ["F11"]),
                                ("last-file", lambda *_: self.jump_last(), ["<Control>Tab", "<Control><Shift>Tab"]),
                                ("tab-next", lambda *_: self.cycle_doc_tab(1), ["<Control>Page_Down"]),
                                ("tab-prev", lambda *_: self.cycle_doc_tab(-1), ["<Control>Page_Up"]),
@@ -1166,6 +1179,9 @@ class Notes(Gtk.Application):
         import changelog
         self.upd_btn = changelog.update_button("notist", VERSION, notify=self.notify)     # 󰚰 update neben der Version
         top.append(self.upd_btn)
+        full = ch.button("󰊓", "Vollbild: nur Dokument und Werkzeugleiste (F11)", action="win.fullscreen")
+        full.set_margin_start(6)
+        top.append(full)
         gear = ch.button("󰒓", "Einstellungen (Strg+,)", action="win.settings")
         gear.set_margin_start(6)
         top.append(gear)
@@ -1183,6 +1199,7 @@ class Notes(Gtk.Application):
         top_scroll = Gtk.ScrolledWindow(hscrollbar_policy=Gtk.PolicyType.EXTERNAL,
                                         vscrollbar_policy=Gtk.PolicyType.NEVER, propagate_natural_height=True)
         top_scroll.set_child(top)
+        self.top_scroll = top_scroll
         root.append(top_scroll)
 
         # Seitenleiste | Editor mit ziehbarem Trenner (Breite wird gemerkt: prefs["side_width"])
@@ -1314,6 +1331,7 @@ class Notes(Gtk.Application):
         status_scroll = Gtk.ScrolledWindow(hscrollbar_policy=Gtk.PolicyType.EXTERNAL,
                                            vscrollbar_policy=Gtk.PolicyType.NEVER, propagate_natural_height=True)
         status_scroll.set_child(status)
+        self.status_scroll = status_scroll
         root.append(status_scroll)
         self.right.connect("notify::visible-child-name", lambda *_: self.update_status_ui())
 
@@ -1409,7 +1427,8 @@ class Notes(Gtk.Application):
         self.text = Gtk.TextView(wrap_mode=Gtk.WrapMode.WORD_CHAR, top_margin=2, bottom_margin=12,
                                  left_margin=0, right_margin=4, pixels_inside_wrap=2)
         self.text.add_css_class("note-text")
-        self.text.add_tick_callback(self._tbl_tick)
+        # Tabellenbreite nur bei Größenänderung nachziehen (ein Tick-Callback hielt den Frame-Takt dauernd auf 60 Hz)
+        tscroll.get_hadjustment().connect("notify::page-size", lambda *_: GLib.idle_add(self._tbl_tick) and False)
         wr.calm_handles(self.text)
         buf = self.text.get_buffer()
         buf.create_tag("bold", weight=Pango.Weight.BOLD)
@@ -1450,6 +1469,8 @@ class Notes(Gtk.Application):
                                            and self.mode != "trash")
         # Rechtsklick-Menü (spell.context_menu) nutzt den eigenen Verlauf statt GTKs
         self.spell_notes.undo = (self.note_undo, self.note_redo)
+        self.spell_notes.image_hook = lambda x, y: self.mode != "trash" and self.image_menu_at(x, y)
+        self.spell_docs.image_hook = self.writer.image_context
         self.spell_docs.undo = (self.writer.undo, self.writer.redo)
         self.writer.tool_tail.append(self.make_spell_btn("wt"))
         self.latex = lx.LatexEditor(self.win, self.on_edit, self.prefs.setdefault("latex", {}), self.notify)
@@ -1464,7 +1485,12 @@ class Notes(Gtk.Application):
                            lambda q: self.count_all("docs", q), self.search_all)
         findbar.attach_all(self.latex.findrev.get_child(), self.latex.find_entry, "latex-dokumenten",
                            lambda q: self.count_all("latex", q), self.search_all)
-        note.append(tscroll)
+        # Standbild über dem Text, solange Rückgängig das Layout neu aufbaut (wie in Words)
+        self.note_freeze = Gtk.Picture(can_target=False, visible=False, content_fit=Gtk.ContentFit.FILL)
+        tov = Gtk.Overlay(vexpand=True, hexpand=True)
+        tov.set_child(tscroll)
+        tov.add_overlay(self.note_freeze)
+        note.append(tov)
         self.note_scroll = tscroll
         import follow
         on = lambda: self.opt_value("typewriter")
@@ -1876,6 +1902,7 @@ class Notes(Gtk.Application):
         (das Original bleibt). Rechtsklick auf ein Format heftet es an bzw. löst es."""
         entries = [("Weitergeben", (("󰆏", "Als Text kopieren", "", "win.share-copy"),
                                     ("󰇮", "Per E-Mail senden …", "", "win.share-mail"),
+                                    *((("󰐪", "Drucken …", "", "win.doc-print"),) if self.kind in ("notes", "docs") else ()),
                                     ("󰠮", "Für Freunde mit notist (.notes) …", "", "win.share-bundle")))]
         pins = [f for f in self.export_pinned() if f in xp.FORMATS and self.kind in xp.FORMATS[f][3]]
         rest = [f for f in xp.FORMATS if f not in pins and self.kind in xp.FORMATS[f][3]]
@@ -2039,8 +2066,14 @@ class Notes(Gtk.Application):
         self.notify("Noch keine andere Datei geöffnet")
 
     def jump_to(self, kind, nid):
-        self.set_kind(kind)
-        self.select(nid)
+        """Datei öffnen und exakt dort weitermachen, wo man dort aufgehört hat (Cursor + Bildausschnitt)."""
+        self.last_sel[kind] = nid                  # set_kind/apply_kind wählt dann gleich diesen Eintrag
+        if self.view == "home" or kind != self.kind:
+            self._auto_pos = "force"
+            self.set_kind(kind)
+        else:
+            self._auto_pos = "force"
+            self.select(nid)
 
     # ================= Bilder in Notizen =================
     IMG_SIZES = (("Klein", 180), ("Mittel", 320), ("Groß", 520))
@@ -2300,7 +2333,7 @@ class Notes(Gtk.Application):
         if w != getattr(self, "_tbl_w", 0):
             self._tbl_w = w
             self.relayout_note_tables()
-        return GLib.SOURCE_CONTINUE
+        return GLib.SOURCE_REMOVE
 
     def image_menu_at(self, x, y):
         bx, by = self.text.window_to_buffer_coords(Gtk.TextWindowType.WIDGET, int(x), int(y))
@@ -2812,7 +2845,7 @@ class Notes(Gtk.Application):
         visible = self.store.visible()
         want = self.last_sel.get(self.kind)
         if want and want in {n["id"] for n in visible}:
-            self._auto_pos = True                 # Rückkehr per Moduswechsel → an die alte Stelle
+            self._auto_pos = getattr(self, "_auto_pos", False) or True      # Rückkehr per Moduswechsel → an die alte Stelle
             self.select(want)
         elif visible:
             self.select(visible[0]["id"])
@@ -2864,6 +2897,30 @@ class Notes(Gtk.Application):
     def new_label_for(self, kind):
         return {"notes": "Neue Notiz", "docs": "Neues Dokument", "latex": "Neues LaTeX-Dokument"}[kind]
 
+    zen = False
+
+    def set_zen(self, on):
+        """Vollbild (F11): nur Dokument und Werkzeugleiste – Kopfleiste, Statuszeile, Liste, Titelzeile und
+        Seitenränder (zuletzt geöffnet) sind weg. Esc oder F11 holt alles zurück."""
+        on = bool(on) and self.view != "home"
+        if on == self.zen:
+            return
+        self.zen = on
+        for w in (self.top_scroll, self.status_scroll, self.left, self.note_title_row,
+                  self.writer.title_row, self.latex.title_row):
+            w.set_visible(not on)
+        self.recent.pin_rev.set_visible(not on)
+        self.recent.edge.set_visible(not on and not (self.recent.pinned and not self.recent.narrow))
+        if on:
+            self.recent.close()
+            self.hide_jump()
+        (self.win.fullscreen if on else self.win.unfullscreen)()
+        if on:
+            self.notify("Vollbild – Esc oder F11 beendet es")
+        v, _sc = self.pos_widgets()
+        if v is not None:
+            GLib.idle_add(lambda: (v.grab_focus(), False)[1])
+
     def leave_to_home(self):
         """Strg+W / Esc: aus dem geöffneten Eintrag zurück zur Übersicht (schließt nie das Fenster)."""
         if self.view != "home":
@@ -2875,6 +2932,9 @@ class Notes(Gtk.Application):
         if kv != Gdk.KEY_Escape or state & (Gdk.ModifierType.CONTROL_MASK | Gdk.ModifierType.SHIFT_MASK |
                                             Gdk.ModifierType.ALT_MASK):
             return False
+        if self.zen:
+            self.set_zen(False)
+            return True
         if self.view == "home" and not self.home_expanded:
             return False
         self.leave_to_home()
@@ -3006,6 +3066,8 @@ class Notes(Gtk.Application):
             self.flush()
             self.remember_pos()
             self.hide_jump()
+            if self.zen:
+                self.set_zen(False)
             if self.current and is_empty(self.current):
                 self.drop_empty(self.current)
             if self.current:
@@ -4574,11 +4636,13 @@ class Notes(Gtk.Application):
         self.notify(f"Gespeichert: {os.path.basename(path)}{extra}")
 
     def print_doc(self):
-        if not self.docs or not self.current:
+        if self.tex or not self.current:
             return
         import render
+        self.flush(force=True)
         try:
-            render.print_doc(self.writer.to_model(), self.win, self.current["title"], self.writer.page)
+            render.print_doc(self.export_blocks(), self.win, self.current["title"] or self.display_title(self.current),
+                             self.writer.page if self.docs else None)
         except GLib.Error as e:
             self.notify(f"Drucken fehlgeschlagen: {e.message}")
 
@@ -5376,6 +5440,17 @@ class Notes(Gtk.Application):
     def note_restore(self, snap, offset):
         anchor = self.__dict__.setdefault("_n_anchor", ScrollAnchor(self.text, self.note_scroll))
         st = anchor.capture()
+        try:
+            self.note_freeze.set_paintable(Gtk.WidgetPaintable.new(self.note_scroll).get_current_image())
+            self.note_freeze.set_visible(True)
+            self.note_scroll.set_opacity(0)      # sonst scheint der neu aufgebaute Text durch das (durchsichtige) Standbild
+        except Exception:  # noqa: BLE001
+            pass
+
+        def unfreeze():
+            self.note_scroll.set_opacity(1)
+            self.note_freeze.set_visible(False)
+            self.note_freeze.set_paintable(None)
         self._n_restoring = True
         self._loading = True
         self.load_rich(snap)
@@ -5383,7 +5458,7 @@ class Notes(Gtk.Application):
         self._n_restoring = False
         buf = self.text.get_buffer()
         buf.place_cursor(buf.get_iter_at_offset(min(offset, buf.get_char_count())))
-        anchor.restore(buf, offset, st)
+        anchor.restore(buf, offset, st, unfreeze)
         full, state = self.note_snapshot()
         self.n_last, self._n_last_full = state, full
         self.style_checks()
@@ -5557,38 +5632,72 @@ class Notes(Gtk.Application):
         pos = self.prefs.get("positions", {}).get(n["id"]) if n else None
         if not pos or (pos[0] == 0 and pos[1] == 0 and pos[2] < 40):
             return
-        if auto and self.prefs.get("keep_pos", True) and n["id"] in getattr(self, "session_pos", ()):
-            self.restore_pos(n, pos)
+        if auto == "force" or auto and self.prefs.get("keep_pos", True) and n["id"] in getattr(self, "session_pos", ()):
+            self.restore_pos(n, pos, focus=auto == "force")
         elif self.prefs.get("jump_btn", True):
             self.show_jump(n, pos)
 
-    def restore_pos(self, n, pos):
-        """Cursor setzen und hinscrollen – mehrfach, weil Words/LaTeX ihre Zeilenhöhen erst nach und nach kennen."""
+    def restore_pos(self, n, pos, focus=False):
+        """Cursor setzen und hinscrollen. Words/LaTeX kennen ihre Zeilenhöhen erst nach und nach (GTK klemmt die
+        Scrollposition, solange das Layout geschätzt ist) – deshalb pro Bild nachrücken, bis das Layout steht oder
+        der Nutzer selbst scrollt/tippt/klickt."""
         v, sc = self.pos_widgets()
         if v is None:
             return
         self._pos_seq = seq = getattr(self, "_pos_seq", 0) + 1
         if self.docs:
             self.writer.cancel_scroll_reset()
+        self.watch_user_input(v, sc)
         buf = v.get_buffer()
         adj = sc.get_vadjustment()
-        state = {"set": None}
+        t0 = time.monotonic()
+        end = buf.get_end_iter().get_offset()
+        buf.place_cursor(buf.get_iter_at_offset(min(pos[0], end)))
+        if focus:
+            v.grab_focus()
+        v._no_follow_until = t0 + 2.0                     # Mitscrollen hält still, solange wir zurechtrücken
+        st = {"calm": 0, "key": None}
 
-        def apply(first=False):
-            if seq != self._pos_seq or self.current is not n or self.view == "home":
-                return False
-            if not first and state["set"] is not None and abs(adj.get_value() - state["set"]) > 1:
-                return False                       # inzwischen selbst gescrollt → nicht dazwischenfunken
+        def step(widget=None, clock=None):
+            if seq != self._pos_seq or self.current is not n or self.view == "home" \
+                    or self._user_input > t0:
+                return GLib.SOURCE_REMOVE
             end = buf.get_end_iter().get_offset()
-            if first:
-                buf.place_cursor(buf.get_iter_at_offset(min(pos[0], end)))
             y, _h = v.get_line_yrange(buf.get_iter_at_offset(min(pos[1], end)))
-            adj.set_value(y + pos[2])
-            state["set"] = adj.get_value()
+            target = max(0, min(y + pos[2], adj.get_upper() - adj.get_page_size()))
+            if abs(adj.get_value() - target) > 1:
+                adj.set_value(target)
+            key = (round(adj.get_upper()), round(y))
+            st["calm"] = st["calm"] + 1 if key == st["key"] else 0
+            st["key"] = key
+            busy = self.docs and (self.writer._pages_id is not None or self.writer._verify_id is not None
+                                  or self.writer._quick_id is not None)       # Words setzt die Seitenabstände erst nach und nach
+            if time.monotonic() - t0 > 4.0 or (st["calm"] >= 12 and time.monotonic() - t0 > 0.4 and not busy):
+                return GLib.SOURCE_REMOVE
+            return GLib.SOURCE_CONTINUE
+        step()
+        v.add_tick_callback(step)
+
+    def watch_user_input(self, v, sc):
+        """Merkt sich (einmal je Ansicht), wann der Nutzer zuletzt selbst gescrollt/getippt/geklickt hat."""
+        self._user_input = getattr(self, "_user_input", 0)
+        if getattr(sc, "_ist_watch", False):
+            return
+        sc._ist_watch = True
+
+        def touch(*_):
+            self._user_input = time.monotonic()
             return False
-        GLib.timeout_add(30, lambda: apply(True))
-        for ms in (160, 450, 1000):
-            GLib.timeout_add(ms, apply)
+        scr = Gtk.EventControllerScroll(flags=Gtk.EventControllerScrollFlags.BOTH_AXES,
+                                        propagation_phase=Gtk.PropagationPhase.CAPTURE)
+        scr.connect("scroll", touch)
+        sc.add_controller(scr)
+        key = Gtk.EventControllerKey(propagation_phase=Gtk.PropagationPhase.CAPTURE)
+        key.connect("key-pressed", touch)
+        v.add_controller(key)
+        click = Gtk.GestureClick(button=0, propagation_phase=Gtk.PropagationPhase.CAPTURE)
+        click.connect("pressed", touch)
+        v.add_controller(click)
 
     def build_jump(self):
         self.jump_rev = Gtk.Revealer(transition_type=Gtk.RevealerTransitionType.SLIDE_UP, transition_duration=180,
@@ -5906,6 +6015,7 @@ class Notes(Gtk.Application):
             if getattr(self, "_settings_win", None):
                 self._settings_win.close()
             self.win.set_visible(False)
+            GLib.timeout_add_seconds(3, lambda: (__import__("gc").collect(), trim_memory(), False)[-1])   # im Hintergrund schlank bleiben
             return True
         if getattr(self, "_held", False):
             self._held = False

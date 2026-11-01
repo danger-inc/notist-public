@@ -8,7 +8,7 @@ gi.require_version("Pango", "1.0")
 gi.require_version("PangoCairo", "1.0")
 gi.require_version("GdkPixbuf", "2.0")
 gi.require_version("Gdk", "4.0")
-from gi.repository import Gdk, GdkPixbuf, GLib, Pango, PangoCairo
+from gi.repository import Gdk, GdkPixbuf, Gio, GLib, Pango, PangoCairo
 
 import docfmt as df
 
@@ -16,9 +16,11 @@ PAGE_W, PAGE_H = 595.28, 841.89          # A4 in pt (Standard; tatsächlich aus 
 MARGIN = 70.87                           # 2,5 cm
 MM = 72 / 25.4
 FN_SIZE = 9                              # Fußnoten (pt)
-PARA_AFTER = 8.0
+PARA_AFTER = 6.0                         # wie im Editor: 8 px unter dem Absatz
+AFTER = {"title": 10.5, "h1": 4.5, "h2": 3.0, "h3": 1.5}
+TAB_STOPS = 40
 LIST_STEP = 18.0                         # Einzug je Ebene (pt)
-BEFORE = {"title": 0, "h1": 14, "h2": 10, "h3": 8}
+BEFORE = {"title": 0, "h1": 13.5, "h2": 10.5, "h3": 7.5}
 
 
 def span(r):
@@ -55,6 +57,11 @@ class Paginator:
         self.cr = cairo.Context(surf)
         self.pctx = PangoCairo.create_context(self.cr)
         PangoCairo.context_set_resolution(self.pctx, 72)    # 1 Einheit = 1 pt
+        fo = cairo.FontOptions()                            # Glyphbreiten nicht auf ganze pt runden (sonst bricht
+        fo.set_hint_metrics(cairo.HINT_METRICS_OFF)         # der Text anders um als im Editor bei normalem Zoom)
+        fo.set_hint_style(cairo.HINT_STYLE_NONE)
+        PangoCairo.context_set_font_options(self.pctx, fo)
+        self.pctx.set_round_glyph_positions(False)
         self.page_cfg = df.norm_page(page)
         w, h, (t, r, b, l) = df.page_mm(self.page_cfg)
         self.pw, self.ph = w * MM, h * MM
@@ -100,6 +107,20 @@ class Paginator:
         lay = self.layout(f"<sup>{num}</sup> {html.escape(text)}", self.body_w, font_size=FN_SIZE, spacing=1.0)
         return lay
 
+    def tab_array(self):
+        """Tabstopps wie im Editor (GTK): alle 8 Leerzeichen der Grundschrift."""
+        if getattr(self, "_tabs", None) is None:
+            probe = Pango.Layout.new(self.pctx)
+            size = df.STYLE_FMT["normal"][0]
+            probe.set_font_description(Pango.FontDescription.from_string(f"{df.BASE_FONT} {size}"))
+            probe.set_text(" " * 8, -1)
+            step = max(8.0, probe.get_extents()[1].width / Pango.SCALE)
+            arr = Pango.TabArray.new(TAB_STOPS, False)
+            for i in range(TAB_STOPS):
+                arr.set_tab(i, Pango.TabAlign.LEFT, round((i + 1) * step * Pango.SCALE))
+            self._tabs = arr
+        return self._tabs
+
     def op(self, *a):
         self.pages[-1].append(a)
 
@@ -118,10 +139,8 @@ class Paginator:
         lay.set_alignment({"center": Pango.Alignment.CENTER, "right": Pango.Alignment.RIGHT}.get(
             align, Pango.Alignment.LEFT))
         lay.set_justify(align == "justify")
-        lay.set_line_spacing(spacing)
-        tabs = Pango.TabArray.new(1, True)
-        tabs.set_tab(0, Pango.TabAlign.LEFT, 36)
-        lay.set_tabs(tabs)
+        lay.set_line_spacing(spacing / 1.15)          # 1,15 ist im Editor die natürliche Zeilenhöhe (Tag line_height = v/1,15)
+        lay.set_tabs(self.tab_array())
         lay.set_markup(markup or " ", -1)
         return lay
 
@@ -208,37 +227,136 @@ class Paginator:
             heading = None
             marker = None
             seg.clear()
+        row, tail, pend = [], [], []
+
+        def flush_row():
+            if row:
+                # Text hinter den Bildern steht wie im Editor in deren letzter Zeile (Grundlinie = Unterkante)
+                inline = tail and b.get("align", "left") == "left" and not any(r.get("fn") is not None for r in tail)
+                self.image_row(row, x, width, b.get("align", "left"), tail if inline else None, style, b)
+                if tail and not inline:
+                    seg.extend(tail)
+                row.clear()
+                tail.clear()
+                pend.clear()
         for r in b["runs"]:
             if r.get("img"):
-                if seg:
+                if row and tail:
+                    flush_row()
+                elif seg:
                     flush_text()
-                self.image(r, x, width, b.get("align", "left"))
+                for g in pend:                  # Leerzeichen zwischen Bildern bleiben als Abstand erhalten
+                    row.append(("gap", self.text_width(g, style)))
+                pend.clear()
+                row.append(r)
+            elif row and not tail and not r.get("fn") and not r.get("text", "").strip():
+                pend.append(r)
+            elif row:
+                tail.extend(pend)
+                pend.clear()
+                tail.append(r)
             else:
                 seg.append(r)
+        flush_row()
         if seg or not any(r.get("img") for r in b["runs"]):
             flush_text()
-        self.y += 0 if style == "code" else PARA_AFTER
+        self.y += 0 if style == "code" else AFTER.get(style, PARA_AFTER)
 
-    def image(self, r, x, width, align):
-        try:
-            loader = GdkPixbuf.PixbufLoader()
-            loader.write(base64.b64decode(r["img"]))
-            loader.close()
-            pb = loader.get_pixbuf()
-        except GLib.Error:
-            return
-        w = (r.get("w") or pb.get_width()) * 0.75
-        h = (r.get("h") or pb.get_height()) * 0.75
-        if w > width:
-            h, w = h * width / w, width
+    def text_width(self, r, style="normal"):
+        lay = self.layout(span(r), 10000, style)
+        return lay.get_extents()[1].width / Pango.SCALE
+
+    def image_row(self, runs, x, width, align, tail=None, style="normal", b=None):
+        """Bilder (und der Leerraum dazwischen) stehen wie im Editor in einer Zeile und brechen bei Platzmangel um;
+        Text dahinter sitzt auf der Grundlinie der letzten Bildzeile."""
         maxh = self.ph - self.mt - self.mb
-        if h > maxh:
-            w, h = w * maxh / h, maxh
-        if self.y + h > self.bottom:
-            self.new_page()
-        ix = x + {"center": (width - w) / 2, "right": width - w}.get(align, 0)
-        self.op("image", pb, ix, self.y, w, h)
-        self.y += h + 4
+        items = []
+        for r in runs:
+            if isinstance(r, tuple):
+                items.append(("gap", r[1]))
+                continue
+            try:
+                loader = GdkPixbuf.PixbufLoader()
+                loader.write(base64.b64decode(r["img"]))
+                loader.close()
+                pb = loader.get_pixbuf()
+            except GLib.Error:
+                continue
+            w = (r.get("w") or pb.get_width()) * 0.75
+            h = (r.get("h") or pb.get_height()) * 0.75
+            if w > width:
+                h, w = h * width / w, width
+            if h > maxh:
+                w, h = w * maxh / h, maxh
+            items.append(("img", pb, w, h))
+        lines, cur, cw = [], [], 0.0
+        for it in items:
+            if it[0] == "gap":
+                if cur:
+                    cur.append(it)
+                    cw += it[1]
+                continue
+            if cur and cw + it[2] > width + 0.5:
+                while cur and cur[-1][0] == "gap":
+                    cw -= cur.pop()[1]
+                lines.append((cur, cw))
+                cur, cw = [], 0.0
+            cur.append(it)
+            cw += it[2]
+        if cur:
+            if not tail:
+                while cur and cur[-1][0] == "gap":
+                    cw -= cur.pop()[1]
+            lines.append((cur, cw))
+        probe = self.layout(" ", width, style, align, 1.15)
+        pit = probe.get_iter()
+        desc = probe.get_extents()[1].height / Pango.SCALE - pit.get_baseline() / Pango.SCALE
+        for k, (ln, lw) in enumerate(lines):
+            lh = max([it[3] for it in ln if it[0] == "img"] or [0])
+            if self.y + lh > self.bottom and self.y > self.mt:
+                self.new_page()
+            ix = x + {"center": (width - lw) / 2, "right": width - lw}.get(align, 0)
+            for it in ln:
+                if it[0] == "gap":
+                    ix += it[1]
+                else:
+                    self.op("image", it[1], ix, self.y + lh - it[3], it[2], it[3])
+                    ix += it[2]
+            if tail and k == len(lines) - 1:
+                lay = self.layout("".join(span(r) for r in tail), width, style, align, (b or {}).get("spacing", 1.15))
+                lay.set_indent(round(lw * Pango.SCALE))
+                base0 = lay.get_iter().get_baseline() / Pango.SCALE
+                bottom = self.y + lh
+                self.y = bottom - base0
+                self.place_layout(lay, x, (0, 0, 0))
+                self.y = max(self.y, bottom + desc)
+            else:
+                self.y += lh + desc
+
+    def pdf_block(self, b):
+        """Angehängtes PDF: jede Seite des Anhangs kommt vektorgenau, passend skaliert, auf eine eigene Seite."""
+        try:
+            import os
+            import paths
+            gi.require_version("Poppler", "0.18")
+            from gi.repository import Poppler
+            src = os.path.join(paths.DATA, "pdfs", os.path.basename(b["file"]))
+            doc = Poppler.Document.new_from_file(Gio.File.new_for_path(src).get_uri(), None)
+        except Exception:  # noqa: BLE001
+            self.paragraph({"t": "p", "style": "normal", "runs": [{"i": True, "text": f"[PDF-Anhang {b.get('name', '')} fehlt]"}]})
+            return
+        maxw, maxh = self.body_w, self.bottom - self.mt
+        for i in range(doc.get_n_pages()):
+            page = doc.get_page(i)
+            pw, ph = page.get_size()
+            s = min(maxw / max(pw, 1), maxh / max(ph, 1))
+            if self.y > self.mt:
+                self.new_page()
+            self.op("pdfpage", page, self.ml + (maxw - pw * s) / 2, self.y, s)
+            self.y += ph * s
+            if i < doc.get_n_pages() - 1:
+                self.new_page()
+        self.y += PARA_AFTER
 
     def table(self, b):
         rows = b["rows"] or [[""]]
@@ -304,12 +422,14 @@ class Paginator:
             elif b["t"] == "table":
                 self.table(b)
             elif b["t"] == "hr":
-                if self.y + 12 > self.bottom:
+                if self.y + 15 > self.bottom:
                     self.new_page()
-                self.op("hr", self.ml, self.y + 6, self.pw - self.mr)
-                self.y += 12 + PARA_AFTER
+                self.op("hr", self.ml, self.y + 7.5, self.pw - self.mr)       # Editor: 2 px Linie, 9 px Rand oben/unten
+                self.y += 15 + PARA_AFTER
             elif b["t"] == "pb":
                 self.new_page()
+            elif b["t"] == "pdf":
+                self.pdf_block(b)
             elif b["t"] == "toc":
                 self.toc()
         self.flush_footnotes()
@@ -496,6 +616,13 @@ def draw_page(cr, ops, scale=1.0):
                 cr.arc(x, y, 0.55, 0, 6.2832)
                 cr.fill()
                 x += 3.5
+        elif kind == "pdfpage":
+            _, page, x, y, sc = o
+            cr.save()
+            cr.translate(x, y)
+            cr.scale(sc, sc)
+            page.render_for_printing(cr)
+            cr.restore()
         elif kind == "image":
             _, pb, x, y, w, h = o
             cr.save()

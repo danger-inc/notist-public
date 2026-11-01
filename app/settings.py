@@ -601,7 +601,7 @@ class SettingsWindow(Gtk.Window):
 SHORTCUTS = [
     ("Überall", [("Strg+N", "Neu"), ("Strg+O", "Datei öffnen"), ("Strg+F", "Im Eintrag suchen"), ("Strg+Umschalt+F", "In allen suchen"), ("Strg+Umschalt+T", "Übersetzer Deutsch ⇄ Englisch"), ("Strg+T", "Liste aufklappen (schmales Fenster)"),
                  ("Alt+1 / 2 / 3", "Notizen / Words / LaTeX"), ("Strg+Tab", "Zur zuletzt geöffneten Datei springen (nochmal = zurück)"), ("Strg+P", "Anheften"),
-                 ("Strg+Umschalt+A", "Archivieren"), ("Rechtsklick auf Ordner", "Neu, Unterordner, umbenennen, auflösen"), ("Strg+,", "Einstellungen"), ("F1", "Diese Übersicht"),
+                 ("Strg+Umschalt+A", "Archivieren"), ("Rechtsklick auf Ordner", "Neu, Unterordner, umbenennen, auflösen"), ("Strg+,", "Einstellungen"), ("F11", "Vollbild (nur Dokument + Werkzeugleiste)"), ("F1", "Diese Übersicht"),
                  ("Strg+W / Strg+Q", "Schließen")]),
     ("Notizen", [("Strg+B / I / U", "Fett / Kursiv / Unterstrichen"), ("Strg+Umschalt+L", "Checkliste"),
                  ("Strg+V", "Bild aus der Zwischenablage einfügen"), ("Tab im Titel", "In den Text springen")]),

@@ -153,7 +153,7 @@ class RecentDrawer:
         if show:
             self.refresh()
         self.pin_rev.set_reveal_child(show)
-        self.edge.set_visible(not show)
+        self.edge.set_visible(not show and not getattr(self.app, "zen", False))
 
     def refresh(self):
         """Angeheftete Liste aktualisieren (nach Speichern, Bereichswechsel usw.)."""

@@ -1,5 +1,32 @@
 # notist – Änderungen
 
+## 4.25.0 (2026-11-01)
+- **Scroll-Ende**: Wer am Ende einer Seite weiterscrollt, sieht aus der Kante einen Verlauf aus ░ ▒ ▓ █ aufsteigen, am Mauszeiger am höchsten. Die Liste bewegt sich dabei nicht und der Effekt läuft ohne Überschwingen aus. Er erscheint nur, wenn kein umgebendes Scroll-Fenster mehr weiterscrollen kann. Abschalten: `"scroll_end": false` in ~/.config/rice-apps/settings.json oder Energiesparmodus.
+
+## 4.24.0 (2026-11-01)
+- **Seitenumbrüche hängen nicht mehr vom Zoom ab**: Bilder landeten je nach Zoomstufe auf Seite 3 oder 4. Ursachen: Waagerechte Linien hatten feste Abstände und Tabulatoren feste Breite (beide wuchsen nicht mit dem Zoom), und Rundungen von ±1–2 px entschieden bei Grenzfällen anders. Linien und Tabs skalieren jetzt mit; beim reinen Zoomen bleiben die Seitenumbrüche exakt erhalten (neu berechnet wird erst nach einer Änderung am Text oder an der Seite).
+
+## 4.23.2 (2026-11-01)
+- **Pinch-Zoom: Ansicht und Scrollleiste springen nicht mehr** (v. a. beim Rauszoomen): Die Textstelle bleibt auch beim späteren Neuberechnen der Seiten und beim Scharfsetzen der Bilder festgehalten; das Scharfsetzen läuft hinter einem Standbild. Seitenabstände oberhalb der Ansicht schieben die Ansicht gleich mit.
+
+## 4.23.1 (2026-11-01)
+- **Pinch-Zoom flüssig**: Bilder wurden bei jedem Schritt neu dekodiert (bis 1 s pro Schritt bei großen Bildern). Jetzt werden sie währenddessen grob aus dem Vorhandenen skaliert und nach dem Loslassen wieder scharf gesetzt; Schritte dauern ~40 statt 250–1000 ms.
+
+## 4.23.0 (2026-11-01)
+- **Pinch-Zoom in Words** (Touchscreen und Touchpad): Zoom folgt den Fingern stufenlos von 30 bis 300 %, die Ansicht bleibt an derselben Textstelle; schaltet „an Fensterbreite anpassen“ aus wie der Zoom-Regler.
+
+## 4.22.0 (2026-11-01)
+- **Zeilenumbruch ohne Sprung**: Nach Enter am Seitenende stand die neue Zeile ~0,4 s auf der falschen Seite und sprang dann hinterher. Der Seitenumbruch wird jetzt sofort neu gerechnet.
+- **Strg+Tab macht exakt dort weiter**, wo man aufgehört hat (Cursor und Bildausschnitt, auch nach Neustart); die Stelle wird nachgeführt, bis das Layout steht, und der Cursor ist gleich aktiv.
+- **Strg+Z in Notizen springt nicht mehr** (Standbild wie in Words, der neu aufgebaute Text scheint nicht mehr durch das Standbild – das war das kurze Hoch-und-Runter); das Mitscrollen funkt beim Rückgängig nicht mehr dazwischen.
+- **Rechtsklick auf ein Bild** öffnet dieselben Bildeinstellungen wie der Linksklick (Words und Notizen).
+- **Vollbild (F11)**: nur Dokument und Werkzeugleiste; Esc oder F11 beendet es.
+
+## 4.21.2 (2026-10-29)
+- **PDF und Drucken stimmen jetzt mit dem Dokument überein**: Mehrere Bilder in einem Absatz standen im PDF/Ausdruck untereinander (und rissen große Lücken); jetzt stehen sie wie im Editor nebeneinander und brechen bei Platzmangel um. Angehängte PDFs fehlten im Export und Ausdruck komplett – jetzt kommt jede Seite des Anhangs auf eine eigene Seite.
+- **Layout wie im Editor**: Text hinter einem Bild (z. B. die Linien „––––“) steht in derselben Zeile auf der Unterkante des Bildes; Leerzeichen zwischen Bildern bleiben als Abstand erhalten; Zeilenhöhe, Absatz- und Überschriftenabstände, Tabstopps (alle 8 Leerzeichen), Linien und Glyphenbreiten entsprechen der Seitenansicht. Das Quiz hat im PDF jetzt dieselben fünf Seiten und Seitenumbrüche wie im Editor.
+- **Drucken im Teilen-Menü** (Notizen und Words); Notizen lassen sich nun ebenfalls drucken.
+
 ## 4.21.1 (2026-10-28)
 - **Strg+Z springt nicht mehr**: Beim Rückgängig baut notist die Seite neu auf, und für einzelne Bilder fiel die Dokumenthöhe kurz zusammen (z. B. 7174 → 1663 px), sodass die Ansicht für ein, zwei Bilder ganz woanders stand. Jetzt bleibt währenddessen ein Standbild der Seite stehen, und die Ansicht wird erst verschoben, wenn das Layout steht.
 - **.docx öffnen**: Enthält die Datei Textfelder, Diagramme, SmartArt, Formeln oder Formen, sagt notist beim Öffnen, dass diese nicht übernommen werden.
