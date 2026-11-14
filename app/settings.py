@@ -1,5 +1,5 @@
 # Einstellungsfenster (Zahnrad oben rechts) und Tastenkürzel-Übersicht (F1).
-import os, subprocess, sys
+import os, subprocess, sys, time
 
 from gi.repository import Gio, GLib, Gtk, Pango
 
@@ -8,6 +8,7 @@ import chrome as ch
 import dialogs
 import i18n
 import paths
+from core import plat
 
 CSS = """
 .settings-side { background: none; padding: 4px 6px 10px 14px; }
@@ -140,6 +141,7 @@ class SettingsWindow(Gtk.Window):
                  ("backup", "󰁯", "sicherung", self.page_backup),
                  ("history", "󰋚", "verlauf", self.page_history), ("words", "󰈬", "words", self.page_words),
                  ("latex", "󰿈", "latex", self.page_latex), ("spell", "󰓆", "rechtschreibung", self.page_spell),
+                 ("handy", "󰄜", "geräte", self.page_handy),
                  ("about", "󰋽", "über & systemcheck", self.page_about)]
         self.side = side
         for i, (key, icon, label, build) in enumerate(pages, 1):
@@ -195,6 +197,9 @@ class SettingsWindow(Gtk.Window):
         self.head(box, "Allgemein")
         self.sec(box, "Design")
         box.append(themes.picker(on_change=self.app.load_css))
+        if plat.can_follow_system():
+            box.append(row("Hell/Dunkel wie das System", "Folgt der macOS-Einstellung (auch Automatisch, live). Aus: Hell/Dunkel oben wählen",
+                           switch(p, "follow_system", True, lambda on: self.app.load_css())))
         hint = Gtk.Label(xalign=0, wrap=True, label="„Automatisch“ übernimmt die Farben deines Desktops (matugen), "
                                                      "falls vorhanden – dunkel oder hell nach Wahl. Das Design gilt für alle -ist-Apps. "
                                                      "Der Glas-Effekt oben rechts macht Fenster durchscheinend.")
@@ -216,6 +221,9 @@ class SettingsWindow(Gtk.Window):
         box.append(lang_note)
         box.append(row("Im Hintergrund weiterlaufen", "Schließen blendet notist nur aus – der nächste Start geht sofort",
                        switch(p, "background", True)))
+        if plat.can_autostart():
+            box.append(row("Beim Anmelden starten", "Hält notist unsichtbar bereit: Erinnerungen kommen pünktlich, das Fenster ist sofort da",
+                           switch({"a": plat.autostart_enabled()}, "a", False, plat.set_autostart)))
         box.append(row("Markdown verstehen", "**fett**, *kursiv*, # Überschrift, - Liste, [ ] Checkliste beim Tippen "
                        "und Einfügen in Notizen und Words umwandeln",
                        switch(p, "markdown", True, lambda on: p.setdefault("writer", {}).__setitem__("markdown", on))))
@@ -421,7 +429,7 @@ class SettingsWindow(Gtk.Window):
     def open_dir(path):
         path = os.path.expanduser(path)
         os.makedirs(path, exist_ok=True)
-        Gio.AppInfo.launch_default_for_uri(Gio.File.new_for_path(path).get_uri(), None)
+        plat.open_external(path)
 
     def page_history(self, box):
         h = self.prefs.setdefault("history", {})
@@ -550,7 +558,7 @@ class SettingsWindow(Gtk.Window):
         self.sec(box, "Eigene Wörter (eins pro Zeile)")
         tv = Gtk.TextView(monospace=True, wrap_mode=Gtk.WrapMode.NONE)
         try:
-            tv.get_buffer().set_text(open(paths.WORDS).read())
+            tv.get_buffer().set_text(paths.read_file(paths.WORDS))
         except OSError:
             pass
         sc = Gtk.ScrolledWindow(min_content_height=220)
@@ -564,12 +572,164 @@ class SettingsWindow(Gtk.Window):
             b = tv.get_buffer()
             words = sorted({w.strip() for w in b.get_text(b.get_start_iter(), b.get_end_iter(), False).split("\n") if w.strip()})
             os.makedirs(os.path.dirname(paths.WORDS), exist_ok=True)
-            with open(paths.WORDS, "w") as f:
+            with open(paths.WORDS, "w", encoding="utf-8") as f:
                 f.write("\n".join(words) + ("\n" if words else ""))
             spell.reload_words()
             self.app.notify("Eigene Wörter gespeichert")
         save.connect("clicked", do_save)
         box.append(save)
+
+    # ---------- Geräte: Handy-App + andere Rechner (core/handylink.py, core/peerlink.py) ----------
+    def page_handy(self, box):
+        import handylink
+        from core import peerlink
+        self.head(box, "Geräte", "Notizen, Words, LaTeX-Projekte und ein paar Einstellungen werden im WLAN (oder über "
+                                 "Tailscale) mit deinem Handy und mit anderen Rechnern abgeglichen – in beide Richtungen, "
+                                 "verschlüsselt, nur mit gekoppelten Geräten. Ändern beide Seiten denselben Eintrag, "
+                                 "bleibt der neuere Stand und der andere als Kopie „(konflikt)“. Verknüpfte Dateien "
+                                 "bleiben je Gerät eigen: neue Einträge bekommen auf dem anderen Rechner ihre Datei im "
+                                 f"notist-Ordner. {plat.firewall_hint(handylink.PORT)} LaTeX gibt es nur zwischen Rechnern.")
+        self.handy_info = Gtk.Label(xalign=0, wrap=True, hexpand=True)
+        self.handy_info.add_css_class("set-sub")
+        btn = Gtk.Button(label="󰌷  Gerät hierher koppeln")
+        btn.add_css_class("pb")
+        btn.connect("clicked", lambda *_: self.handy_pair())
+        h = Gtk.Box(spacing=10)
+        h.append(self.handy_info)
+        h.append(btn)
+        box.append(h)
+        self.handy_code = Gtk.Label(xalign=0, selectable=True, wrap=True, visible=False)
+        self.handy_code.add_css_class("set-title")
+        box.append(self.handy_code)
+        self.sec(box, "Mit einem anderen Rechner koppeln")
+        info = Gtk.Label(xalign=0, wrap=True, label="Am anderen Rechner: Einstellungen → Geräte → „Gerät hierher koppeln“. "
+                         "Dort erscheint ein Code – hier eintippen. Adresse leer lassen = im Netz suchen; sonst Name oder "
+                         "IP eintragen (auch Tailscale-Namen, optional mit :Port).")
+        info.add_css_class("set-sub")
+        box.append(info)
+        self.peer_addr = Gtk.Entry(placeholder_text=i18n.tr("Adresse (leer = suchen)"), hexpand=True)
+        self.peer_code = Gtk.Entry(placeholder_text=i18n.tr("Code, z. B. ABCD-2345"), max_length=9, width_chars=14)
+        go = Gtk.Button(label="󰌷  Koppeln")
+        go.add_css_class("pb")
+        go.connect("clicked", lambda *_: self.peer_pair())
+        self.peer_code.connect("activate", lambda *_: self.peer_pair())
+        pr = Gtk.Box(spacing=8)
+        for w in (self.peer_addr, self.peer_code, go):
+            pr.append(w)
+        box.append(pr)
+        self.peer_msg = Gtk.Label(xalign=0, wrap=True)
+        self.peer_msg.add_css_class("set-sub")
+        box.append(self.peer_msg)
+        srv = getattr(self.app, "handy", None)
+        if srv is not None:
+            box.append(row("Abgleich mit Rechnern", "Außerdem beim Zurückkehren ins Fenster und auf Knopfdruck",
+                           dropdown([(m, "nur auf Knopfdruck" if m == 0 else f"alle {m} Minuten") for m in peerlink.CHOICES],
+                                    srv.peers.interval(), self.set_peer_min)))
+        self.sec(box, "Gekoppelte Geräte")
+        self.handy_list = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6)
+        box.append(self.handy_list)
+        if srv is not None:
+            srv.listeners.append(self.update_handy)
+            self.connect("destroy", lambda *_: self.update_handy in srv.listeners and srv.listeners.remove(self.update_handy))
+        self.update_handy()
+
+    def set_peer_min(self, m):
+        self.prefs.setdefault("handy", {})["peer_min"] = int(m)
+        self.app.save_prefs()
+
+    def handy_pair(self):
+        srv = getattr(self.app, "handy", None)
+        if srv is None:
+            return
+        ok, code, ips = srv.start_pairing()
+        if not ok:
+            self.update_handy()
+            return
+        self.handy_code.set_label(f"Code  {code}    ·    Adresse  {', '.join(ips) or '?'}    ·    3 Minuten gültig\n"
+                                  "Handy: ⚙ → pc-abgleich → koppeln. Anderer Rechner: Einstellungen → Geräte → "
+                                  "„Mit einem anderen Rechner koppeln“.")
+        self.handy_code.set_visible(True)
+        stamp = code
+
+        def expire():
+            pr = srv.pairing
+            if pr is None or pr["code"][:4] + "-" + pr["code"][4:] != stamp or pr["until"] < time.time():
+                if self.handy_code.get_label().startswith(f"Code  {stamp}"):
+                    self.handy_code.set_visible(False)
+                return False
+            return True
+        GLib.timeout_add_seconds(2, expire)
+        self.update_handy()
+
+    def peer_pair(self):
+        import threading
+        srv = getattr(self.app, "handy", None)
+        if srv is None:
+            return
+        addr, code = self.peer_addr.get_text(), self.peer_code.get_text()
+        self.peer_msg.set_label(i18n.tr("Suche und koppele …"))
+
+        def work():
+            try:
+                p = srv.peers.pair(addr, code)
+                msg = i18n.tr("Gekoppelt mit {}. Erster Abgleich läuft …").format(p.get("name") or p["host"])
+                GLib.idle_add(lambda: (self.peer_code.set_text(""), False)[1])
+                srv.peers.sync_bg(p["id"], manual=True)
+            except Exception as e:  # noqa: BLE001
+                msg = "⚠ " + i18n.tr(str(e))
+            GLib.idle_add(lambda: (self.peer_msg.set_label(msg), False)[1])
+        threading.Thread(target=work, daemon=True).start()
+
+    def update_handy(self):
+        srv = getattr(self.app, "handy", None)
+        lst = getattr(self, "handy_list", None)
+        if lst is None:
+            return False
+        while (c := lst.get_first_child()):
+            lst.remove(c)
+        if srv is None:
+            self.handy_info.set_label("Abgleich nicht verfügbar")
+            return False
+        if srv.pairing is None:
+            self.handy_code.set_visible(False)
+        peers = srv.peers.peers
+        n = len(srv.devices) + len(peers)
+        if srv.error:
+            self.handy_info.set_label(f"⚠ {srv.error}")
+        elif not n:
+            self.handy_info.set_label("Noch kein Gerät gekoppelt")
+        else:
+            self.handy_info.set_label(("● Abgleich bereit" if srv.running else "○ aus") + f" · {n} Gerät(e)")
+
+        def when(last):
+            return i18n.tr("Letzter Abgleich ") + time.strftime("%d.%m. %H:%M", time.localtime(last)) if last else i18n.tr("Noch kein Abgleich")
+        for dev_id, d in sorted(srv.devices.items(), key=lambda kv: kv[1].get("paired") or 0):
+            pc = d.get("kind") == "pc"
+            rm = Gtk.Button(label="Entkoppeln")
+            rm.add_css_class("pb"); rm.add_css_class("small")
+            rm.connect("clicked", lambda *_, i=dev_id: srv.remove(i))
+            lst.append(row(("󰌢  " if pc else "󰄜  ") + (d.get("name") or (i18n.tr("Rechner") if pc else i18n.tr("Handy"))),
+                           (i18n.tr("Rechner, spricht diesen an · ") if pc else "") + when(d.get("last")), rm))
+        for pid, p in sorted(peers.items(), key=lambda kv: kv[1].get("added") or 0):
+            b = Gtk.Box(spacing=6)
+            now = Gtk.Button(label="Abgleichen")
+            now.add_css_class("pb"); now.add_css_class("small")
+            now.set_sensitive(pid not in srv.peers.busy)
+            now.connect("clicked", lambda *_, i=pid: srv.peers.sync_bg(i, manual=True))
+            rm = Gtk.Button(label="Entfernen")
+            rm.add_css_class("pb"); rm.add_css_class("small")
+            rm.connect("clicked", lambda *_, i=pid: srv.peers.remove(i))
+            b.append(now)
+            b.append(rm)
+            sub = (i18n.tr("läuft …") if pid in srv.peers.busy else when(p.get("last"))) + f" · {p.get('host')}"
+            if p.get("err"):
+                sub += "\n⚠ " + i18n.tr(p["err"])
+            lst.append(row("󰌢  " + (p.get("name") or p.get("host") or "Rechner"), sub, b))
+        if not n:
+            l = Gtk.Label(label="—", xalign=0)
+            l.add_css_class("set-sub")
+            lst.append(l)
+        return False
 
     def page_about(self, box):
         here = self.app.here

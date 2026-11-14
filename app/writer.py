@@ -2,6 +2,7 @@
 # Seite (A4) wird unter den Text gezeichnet, Formatierung steckt in TextTags, Tabellen/Linien/Seitenumbrüche
 # sind eingebettete Widgets. Das Dokument-Modell (Blöcke) und DOCX/PDF stecken in docfmt.py / render.py.
 import base64
+import paths
 import functools
 import time
 import threading, copy, datetime, json, math, os, re, sys
@@ -13,11 +14,13 @@ gi.require_version("Graphene", "1.0")
 gi.require_version("GdkPixbuf", "2.0")
 from gi.repository import Gdk, GdkPixbuf, Gio, GLib, GObject, Graphene, Gtk, Pango
 
+from core import plat
 import docfmt as df
 import imgcompress
 from undoview import ScrollAnchor
 from imgobj import ImageObjects, fl_of, placeholder
 import pdfblock
+import sheetblock
 from review import ReviewMixin
 import i18n
 from mdnotes import looks_like_markdown as md_detect
@@ -267,6 +270,27 @@ def pixel_texture(data, w, h):
     return Gdk.Texture.new_for_pixbuf(pb)
 
 
+class ZoomPreview(Gtk.Widget):
+    """Weiche Zoom-Animation: ein Standbild (Render-Knoten, bleibt also scharf) der Ansicht wird pro Bild skaliert –
+    x' = left + s·(x − left0), y' = py + s·(y − py). Das echte Neu-Layout läuft unsichtbar dahinter."""
+
+    def __init__(self):
+        super().__init__(can_target=False, visible=False, hexpand=True, vexpand=True)
+        self.set_overflow(Gtk.Overflow.HIDDEN)
+        self.pic, self.s, self.map = None, 1.0, (0.0, 0.0, 0.0, 0.0)
+
+    def do_snapshot(self, snap):
+        if self.pic is None:
+            return
+        ax, bx, ay, by = self.map
+        snap.save()
+        snap.translate(Graphene.Point().init(ax, ay))
+        snap.scale(self.s, self.s)
+        snap.translate(Graphene.Point().init(-bx, -by))
+        self.pic.snapshot(snap, self.pic.get_intrinsic_width(), self.pic.get_intrinsic_height())
+        snap.restore()
+
+
 class WrapLayout(Gtk.LayoutManager):
     """Kinder nebeneinander, bei Platzmangel in die nächste Zeile (wie Wörter im Fließtext)."""
 
@@ -335,6 +359,7 @@ def _accent_css():
 
 CSS += _accent_css()
 CSS += pdfblock.CSS
+CSS += sheetblock.CSS
 
 
 def _rect(x, y, w, h):
@@ -1030,7 +1055,7 @@ class TableBlock(Gtk.Box):
         r, c = self.pos_of(tv)
         nrow, ncol = len(self.cells), len(self.cells[0])
         shift = bool(state & Gdk.ModifierType.SHIFT_MASK)
-        if state & (Gdk.ModifierType.CONTROL_MASK | Gdk.ModifierType.ALT_MASK):
+        if state & (plat.primary_mask() | Gdk.ModifierType.ALT_MASK):
             return False
         buf = tv.get_buffer()
         ins = buf.get_iter_at_mark(buf.get_insert())
@@ -1392,7 +1417,10 @@ class PageView(Gtk.TextView):
     def do_size_allocate(self, width, height, baseline):
         Gtk.TextView.do_size_allocate(self, width, height, baseline)
         if width != self._last_width:
+            if self._last_width and self.w.fit and not self.w.flow:
+                self.w._fit_pending = True       # „Seitenbreite“: gleich nach diesem Layout zoomen (Writer._on_clock_layout)
             self._last_width = width
+            self.w._clock_hook()
             GLib.idle_add(self.w.update_geometry)
 
     def do_snapshot_layer(self, layer, snap):
@@ -1491,9 +1519,6 @@ class Writer(ImageObjects, ReviewMixin, Gtk.Box):
         click.connect("released", self.on_click)
         self.view.add_controller(click)
         self.imgobj_init()
-        zoom = Gtk.EventControllerScroll(flags=Gtk.EventControllerScrollFlags.VERTICAL)
-        zoom.connect("scroll", self.on_scroll)
-        self.view.add_controller(zoom)
         self.view.connect("paste-clipboard", self.on_paste)
         self.view.connect("copy-clipboard", lambda v: self.copy_rich(False))
         self.view.connect("cut-clipboard", lambda v: self.copy_rich(True))
@@ -1524,12 +1549,26 @@ class Writer(ImageObjects, ReviewMixin, Gtk.Box):
         pinch.connect("end", self.pinch_end)
         pinch.connect("cancel", self.pinch_end)
         self.scroll_box.add_controller(pinch)
-        self._pinch_id, self._pinch = None, None
+        self._pinch = None
+        self._wheel, self._live, self._live_id, self._sharp_id = None, None, None, None
+        self._zanchor, self._zhold_id, self._zfrozen = None, 0, False
+        self._zfix_frame, self._zfix_n, self._fit_pending, self._calm, self._calm_key = -1, 0, False, None, None
+        # Strg+Rad und Zeiger am Elternbereich (Fangphase): die Ansicht selbst ist während der Zoom-Animation unsichtbar
+        zoom = Gtk.EventControllerScroll(flags=Gtk.EventControllerScrollFlags.VERTICAL,
+                                         propagation_phase=Gtk.PropagationPhase.CAPTURE)
+        zoom.connect("scroll", self.on_scroll)
+        self.scroll_box.add_controller(zoom)
+        motion = Gtk.EventControllerMotion()          # Strg+Rad zoomt um die Stelle unter dem Zeiger
+        motion.connect("motion", self.on_motion)
+        self.scroll_box.add_controller(motion)
         # Standbild über der Seite, solange Undo das Layout neu aufbaut (sonst blitzt die zusammengeklappte Ansicht durch)
         self.freeze_pic = Gtk.Picture(can_target=False, visible=False, content_fit=Gtk.ContentFit.FILL)
         ov = Gtk.Overlay(vexpand=True, hexpand=True)
         ov.set_child(self.hscroll)
         ov.add_overlay(self.freeze_pic)
+        self.zprev = ZoomPreview()
+        ov.add_overlay(self.zprev)
+        self._zp = None
         self.scroll_box.append(ov)
         self.scroll_box.append(self.vbar)
         self.scroll_box.add_css_class("desk")
@@ -1790,7 +1829,8 @@ class Writer(ImageObjects, ReviewMixin, Gtk.Box):
         lok.connect("clicked", lambda *_: self.apply_link())
         self.link_text.connect("activate", lambda *_: self.apply_link())
         self.link_url.connect("activate", self._link_url_enter)
-        self.link_pop.connect("closed", lambda *_: setattr(self, "_link_step", False))
+        self.link_pop.connect("closed", lambda *_: (setattr(self, "_link_step", False),
+                                                    GLib.idle_add(lambda: setattr(self, "_link_edit", None) and False)))
         lrm.connect("clicked", lambda *_: self.apply_link(remove=True))
         group(ins, "Tabellen", [tbl_btn])
         group(ins, "Illustrationen", [img_btn,
@@ -1854,7 +1894,7 @@ class Writer(ImageObjects, ReviewMixin, Gtk.Box):
         self.tools["nav"].connect("toggled", lambda b: self.show_nav(b.get_active()))
         group(view, "Anzeigen", [self.tools["paper"], self.tools["nav"]])
         group(view, "Zoom", [tool("󰍴", "Verkleinern (Strg+−)", lambda *_: self.step_zoom(-1)),
-                             tool("100 %", "Originalgröße", lambda *_: self.set_zoom(1.0)),
+                             tool("100 %", "Originalgröße", lambda *_: self._zoom_live(1.0, idle=0.0)),
                              tool("󰐕", "Vergrößern (Strg++)", lambda *_: self.step_zoom(1))],
               [tool("󰹑 Seitenbreite", "Seite füllt die Breite", lambda *_: self.fit_width())])
         self.tool_tail = group(view, "Prüfen", [], last=True).body.get_first_child()   # notist hängt hier die Rechtschreibung an
@@ -1963,7 +2003,7 @@ class Writer(ImageObjects, ReviewMixin, Gtk.Box):
         zrow = Gtk.Box(spacing=4)
         zrow.append(Gtk.Label(label="Zoom", xalign=0, hexpand=True))
         for lab, tip, cb in (("−", "Kleiner (Strg+−)", lambda *_: self.step_zoom(-1)),
-                             ("100 %", "Normalgröße", lambda *_: self.set_zoom(1.0)),
+                             ("100 %", "Normalgröße", lambda *_: self._zoom_live(1.0, idle=0.0)),
                              ("+", "Größer (Strg++)", lambda *_: self.step_zoom(1))):
             b = Gtk.Button(label=lab, tooltip_text=tip, focus_on_click=False)
             b.add_css_class("tchip")
@@ -2499,12 +2539,12 @@ class Writer(ImageObjects, ReviewMixin, Gtk.Box):
         self.zoom_scale.set_can_focus(False)
         self.zoom_scale.add_mark(1.0, Gtk.PositionType.BOTTOM, None)
         self.zoom_scale.set_value(self.zoom)
-        self.zoom_scale.connect("value-changed", lambda sc: self._sync or self.set_zoom(round(sc.get_value(), 2)))
+        self.zoom_scale.connect("value-changed", lambda sc: self._sync or self._zoom_live(sc.get_value()))
         bar.append(self.zoom_scale)
         bar.append(tool("󰐕", "Vergrößern (Strg++)", lambda *_: self.step_zoom(1)))
         self.zoom_btn = Gtk.Button(tooltip_text="Auf 100 % (Strg+0 auf dem Ziffernblock)", focus_on_click=False)
         self.zoom_btn.add_css_class("wt")
-        self.zoom_btn.connect("clicked", lambda *_: self.set_zoom(1.0))
+        self.zoom_btn.connect("clicked", lambda *_: self._zoom_live(1.0, idle=0.0))
         bar.append(self.zoom_btn)
         self.zoom_btn.set_label(f"{round(self.zoom * 100)} %")
         return bar
@@ -2926,6 +2966,7 @@ class Writer(ImageObjects, ReviewMixin, Gtk.Box):
         w = {"table": lambda: TableBlock(self, b.get("rows"), b.get("style")), "hr": lambda: RuleBlock(self),
              "pb": lambda: BreakBlock(self), "toc": lambda: TocBlock(self),
              "pdf": lambda: pdfblock.PdfBlock(self, b),
+             "sheet": lambda: sheetblock.SheetBlock(self, b),
              "fn": lambda: FootnoteMark(self, b.get("text", ""))}[b["t"]]()
         w.kind = b["t"]
         pointer_buttons(w)
@@ -2983,7 +3024,7 @@ class Writer(ImageObjects, ReviewMixin, Gtk.Box):
                     if w.model_style():
                         tb["style"] = w.model_style()
                     out.append(tb)
-                elif w.kind == "pdf":
+                elif w.kind in ("pdf", "sheet"):
                     out.append(w.model())
                 else:
                     out.append({"t": w.kind})
@@ -3027,10 +3068,11 @@ class Writer(ImageObjects, ReviewMixin, Gtk.Box):
         txt = self.buf.get_text(self.buf.get_start_iter(), self.buf.get_end_iter(), False)
         extra = [" ".join(" ".join(r) for r in w.rows()) for w in self.blocks.values() if w.kind == "table"]
         extra += [w.text for w in self.blocks.values() if w.kind == "fn" and w.text]
+        extra += [w.info["name"] for w in self.blocks.values() if w.kind == "sheet"]
         return "\n".join([txt] + extra).strip()
 
     def has_media(self):
-        return bool(self.images) or any(w.kind in ("table", "hr", "toc", "pdf") for w in self.blocks.values())
+        return bool(self.images) or any(w.kind in ("table", "hr", "toc", "pdf", "sheet") for w in self.blocks.values())
 
     # ================= Rückgängig =================
     def checkpoint(self):
@@ -3213,7 +3255,7 @@ class Writer(ImageObjects, ReviewMixin, Gtk.Box):
         have = {f.get_name() for f in Gtk.Label().get_pango_context().list_families()}
         want = ["Noto Sans", "Noto Serif", "Roboto", "Roboto Condensed", "DejaVu Sans", "DejaVu Serif",
                 "Liberation Sans", "Liberation Serif", "Carlito", "Caladea", "Adwaita Sans", "Anton",
-                "Noto Sans Mono", "JetBrains Mono", "Space Mono"]
+                "Noto Sans Mono", "JetBrains Mono", "Space Mono", *plat.font_candidates()]
         return [f for f in want if f in have] or ["Sans"]
 
     def on_font_drop(self, drop, _):
@@ -3621,13 +3663,41 @@ class Writer(ImageObjects, ReviewMixin, Gtk.Box):
             if not self.insert_pdf_file(path):
                 return
             def trash():
-                try:
-                    gf.trash(None)
+                if plat.trash(gf.get_path()):
                     self.win.notify("Original in den Papierkorb gelegt")
-                except GLib.Error as e:
-                    self.win.notify(f"Original nicht gelöscht: {e.message}")
+                else:
+                    self.win.notify("Original nicht gelöscht (kein Papierkorb für diesen Ort)")
             pdfblock.ask_trash_original(self.win, path, trash)
         dlg.open(self.win, None, done)
+
+    def pick_sheet(self):
+        dlg = Gtk.FileDialog(title=i18n.tr("Tabelle einfügen"))
+        f = Gtk.FileFilter()
+        f.set_name(i18n.tr("Tabellen (XLSX, XLS, ODS, CSV)"))
+        for m in ("application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", "application/vnd.ms-excel",
+                  "application/vnd.oasis.opendocument.spreadsheet", "text/csv", "application/x-gnumeric"):
+            f.add_mime_type(m)
+        for e in ("xlsx", "xlsm", "xls", "ods", "csv", "gnumeric"):
+            f.add_suffix(e)
+        store = Gio.ListStore.new(Gtk.FileFilter)
+        store.append(f)
+        dlg.set_filters(store)
+
+        def done(d, res):
+            try:
+                gf = d.open_finish(res)
+            except GLib.Error:
+                return
+            self.insert_sheet_file(gf.get_path())
+        dlg.open(self.win, None, done)
+
+    def insert_sheet_file(self, path):
+        info, err = sheetblock.store(path)
+        if not info:
+            self.win.notify(i18n.tr(err or "Das ist keine lesbare Tabelle"))
+            return False
+        self.insert_block("sheet", extra=info)
+        return True
 
     def insert_pdf_file(self, path):
         info = pdfblock.store(path)
@@ -3639,7 +3709,7 @@ class Writer(ImageObjects, ReviewMixin, Gtk.Box):
 
     def insert_image_file(self, path, own_line=False):
         try:
-            data = open(path, "rb").read()
+            data = paths.read_file(path, True)
         except OSError:
             return False
         self.checkpoint()
@@ -3930,6 +4000,22 @@ class Writer(ImageObjects, ReviewMixin, Gtk.Box):
         if url and "://" not in url and not url.startswith("mailto:"):
             url = ("mailto:" + url) if "@" in url and "/" not in url else "https://" + url
         b = self.buf.get_selection_bounds()
+        ed, self._link_edit = getattr(self, "_link_edit", None), None
+        if ed and url and not remove:                 # bestehenden Link ändern: Text und Adresse ersetzen
+            text = self.link_text.get_text() or url
+            self.checkpoint()
+            s0, e0 = self.buf.get_iter_at_offset(ed[0]), self.buf.get_iter_at_offset(ed[1])
+            self._quiet += 1
+            self.buf.delete(s0, e0)
+            keep = dict(self.active)
+            self.active["link"] = url
+            self.buf.insert(self.buf.get_iter_at_offset(ed[0]), text)
+            self.active = keep
+            self.active.pop("link", None)
+            self._quiet -= 1
+            self.changed()
+            self.focus_text()
+            return
         if remove or not url:
             if b:
                 self.apply_char("link", None)
@@ -4125,7 +4211,7 @@ class Writer(ImageObjects, ReviewMixin, Gtk.Box):
             def done(d, res):
                 try:
                     path = d.open_finish(res).get_path()
-                    data = open(path, "rb").read()
+                    data = paths.read_file(path, True)
                 except (GLib.Error, OSError, AttributeError):
                     return
                 cur = self.buf.get_iter_at_offset(off)
@@ -4172,21 +4258,70 @@ class Writer(ImageObjects, ReviewMixin, Gtk.Box):
                 return False
             GLib.idle_add(maybe_comment)
         state = gesture.get_current_event_state()
-        if n == 1 and not state & (Gdk.ModifierType.CONTROL_MASK | Gdk.ModifierType.SHIFT_MASK) and self.editable:
+        if n == 1 and not state & (plat.primary_mask() | Gdk.ModifierType.SHIFT_MASK) and self.editable:
             it = self.image_at(x, y)
             if it is not None and not self.buf.get_has_selection() or it is not None and \
                     self.buf.get_selection_bounds()[1].get_offset() - self.buf.get_selection_bounds()[0].get_offset() <= 1:
                 GLib.idle_add(lambda: (self.show_image_pop(self.image_at(x, y) or it), False)[1])
                 return
-        if not state & Gdk.ModifierType.CONTROL_MASK:
+        ctrl = bool(state & plat.primary_mask())
+        if not ctrl and (n != 1 or state & Gdk.ModifierType.SHIFT_MASK or self.buf.get_has_selection()):
             return
         bx, by = self.view.window_to_buffer_coords(Gtk.TextWindowType.WIDGET, int(x), int(y))
         ok, it = self.view.get_iter_at_location(bx, by)
         if not ok:
             return
         t = next((t for t in it.get_tags() if t.props.name and t.props.name.startswith("link:")), None)
-        if t:
+        if t and ctrl:
             Gtk.UriLauncher.new(t.props.name[5:]).launch(self.win, None, None)
+        elif t:
+            s0 = it.copy()
+            if not s0.starts_tag(t):
+                s0.backward_to_tag_toggle(t)
+            e0 = it.copy()
+            e0.forward_to_tag_toggle(t)
+            self.show_link_pop(t.props.name[5:], s0.get_offset(), e0.get_offset(), x, y)
+
+    def show_link_pop(self, url, so, eo, x, y):
+        """Klick auf einen Link: kleines Menü – öffnen · ändern · entfernen."""
+        old = getattr(self, "lnk_pop", None)
+        if old is not None:
+            old.unparent()
+        pop = close_outside(ist_pop(Gtk.Popover(autohide=False, position=Gtk.PositionType.BOTTOM)))
+        box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6, margin_start=8, margin_end=8,
+                      margin_top=8, margin_bottom=8)
+        lab = Gtk.Label(label=url, xalign=0, ellipsize=3, max_width_chars=40)
+        lab.add_css_class("dim-label")
+        box.append(lab)
+        row = Gtk.Box(spacing=6)
+
+        def act(fn):
+            def f(*_):
+                pop.popdown()
+                fn()
+            return f
+
+        def edit():
+            self.buf.select_range(self.buf.get_iter_at_offset(so), self.buf.get_iter_at_offset(eo))
+            self.active["link"] = url
+            self._link_edit = (so, eo)
+            self.open_link()
+
+        def rm():
+            self.apply_range_link(self.buf.get_iter_at_offset(so), self.buf.get_iter_at_offset(eo), None)
+        for lbl, fn in (("󰏌 Öffnen", lambda: Gtk.UriLauncher.new(url).launch(self.win, None, None)),
+                        ("󰏫 Ändern", edit), ("󰆴 Entfernen", rm)):
+            b = Gtk.Button(label=lbl, focus_on_click=False)
+            b.add_css_class("pb"); b.add_css_class("small")
+            b.set_cursor_from_name("pointer")
+            b.connect("clicked", act(fn))
+            row.append(b)
+        box.append(row)
+        pop.set_child(box)
+        pop.set_parent(self.view)
+        pop.set_pointing_to(_rect(int(x), int(y) - 6, 1, 14))
+        self.lnk_pop = pop
+        pop.popup()
 
     # ================= Suchen & Ersetzen =================
     def show_find(self, replace=False):
@@ -4311,13 +4446,13 @@ class Writer(ImageObjects, ReviewMixin, Gtk.Box):
 
     # ================= Tastatur =================
     def on_title_key(self, ctrl, keyval, code, state):
-        if keyval in (Gdk.KEY_Tab, Gdk.KEY_Down) and not state & (Gdk.ModifierType.SHIFT_MASK | Gdk.ModifierType.CONTROL_MASK):
+        if keyval in (Gdk.KEY_Tab, Gdk.KEY_Down) and not state & (Gdk.ModifierType.SHIFT_MASK | plat.primary_mask()):
             self.focus_text()
             return True
         return False
 
     def on_key(self, ctrl, keyval, code, state):
-        if keyval == Gdk.KEY_F1 and state & Gdk.ModifierType.CONTROL_MASK:
+        if keyval == Gdk.KEY_F1 and state & plat.primary_mask():
             self.toggle_ribbon()
             return True
         if self.win.get_focus() is not self.view:
@@ -4332,10 +4467,10 @@ class Writer(ImageObjects, ReviewMixin, Gtk.Box):
                 return True
         if self.flow and self.flowx.on_key(keyval, state):
             return True
-        if keyval in (Gdk.KEY_f, Gdk.KEY_F) and state & Gdk.ModifierType.CONTROL_MASK and state & Gdk.ModifierType.ALT_MASK:
+        if keyval in (Gdk.KEY_f, Gdk.KEY_F) and state & plat.primary_mask() and state & Gdk.ModifierType.ALT_MASK:
             self.insert_footnote()
             return True
-        ctrl_on = bool(state & Gdk.ModifierType.CONTROL_MASK)
+        ctrl_on = bool(state & plat.primary_mask())
         shift = bool(state & Gdk.ModifierType.SHIFT_MASK)
         alt = bool(state & Gdk.ModifierType.ALT_MASK)
         k = Gdk.keyval_to_lower(keyval)
@@ -4359,7 +4494,7 @@ class Writer(ImageObjects, ReviewMixin, Gtk.Box):
                 Gdk.KEY_space: self.clear_format,
                 Gdk.KEY_plus: (lambda: self.toggle_char("sup")) if shift else (lambda: self.step_zoom(1)),
                 Gdk.KEY_KP_Add: lambda: self.step_zoom(1), Gdk.KEY_minus: lambda: self.step_zoom(-1),
-                Gdk.KEY_KP_Subtract: lambda: self.step_zoom(-1), Gdk.KEY_KP_0: lambda: self.set_zoom(1.0),
+                Gdk.KEY_KP_Subtract: lambda: self.step_zoom(-1), Gdk.KEY_KP_0: lambda: self._zoom_live(1.0, idle=0.0),
                 Gdk.KEY_asterisk: lambda: self.toggle_char("sup"),
                 Gdk.KEY_greater: lambda: self.grow_font(1), Gdk.KEY_less: lambda: self.grow_font(-1),
                 Gdk.KEY_0: lambda: self.set_style("normal"), Gdk.KEY_1: lambda: self.set_style("h1"),
@@ -4401,96 +4536,345 @@ class Writer(ImageObjects, ReviewMixin, Gtk.Box):
                 return True
         return False
 
+    # ================= Zoom: ein Weg für alle (Knöpfe, Regler, Strg+±, Strg+Rad/Touchpad, Pinch, Seitenbreite) =================
     def pinch_begin(self, gesture, seq):
-        self._pinch_seq = getattr(self, "_pinch_seq", 0) + 1      # laufendes Festhalten beenden
-        self._pinch = {"z0": self.zoom, "target": self.zoom}
+        ok, cx, cy = gesture.get_bounding_box_center()
+        if ok:                                   # Pinch über einer aufgeklappten PDF zoomt die PDF, nicht das Dokument
+            wd = self.scroll_box.pick(cx, cy, Gtk.PickFlags.DEFAULT)
+            while wd is not None and not isinstance(wd, pdfblock.PdfBlock):
+                wd = wd.get_parent()
+            if wd is not None and wd.hsc.get_visible():
+                self._pinch = None
+                gesture.set_state(Gtk.EventSequenceState.DENIED)
+                return
+        pt = None
+        if ok:                                   # Fingermitte → Koordinaten der Ansicht (hscroll)
+            okp, p = self.scroll_box.compute_point(self.hscroll, Graphene.Point().init(cx, cy))
+            pt = (p.x, p.y) if okp else None
+        self._pinch = {"z0": self._zp["target"] if self._zp else self.zoom, "pt": pt}
 
     def pinch_changed(self, gesture, scale):
         p = self._pinch
-        if p is None:
-            return
-        p["target"] = max(0.3, min(3.0, p["z0"] * scale))
-        if self._pinch_id is None:               # Neuaufbau ist teuer (Bilder, Seiten): höchstens ~20× pro Sekunde
-            self._pinch_id = GLib.timeout_add(50, self.pinch_apply)
+        if p is not None:
+            self._zoom_live(p["z0"] * scale, p["pt"])
 
     def pinch_end(self, gesture, seq):
-        if self._pinch_id is not None:
-            GLib.source_remove(self._pinch_id)
-            self._pinch_id = None
-            self.pinch_apply()
-        if self._pinch is not None and self.images and abs(self._pinch["target"] - self._pinch["z0"]) > 0.01:
-            GLib.timeout_add(120, self.pinch_sharpen)      # nach dem Loslassen: Bilder wieder in voller Schärfe
         self._pinch = None
+        if self._zp is not None:
+            self._zp["idle"] = 0.0
 
-    def pinch_sharpen(self):
-        if self._pinch is not None:                         # inzwischen ein neuer Pinch
-            return False
-        adj = self.scroll.get_vadjustment()
-        v = adj.get_value()
-        it, top = self.view.get_line_at_y(int(v))
-        line, rel = it.get_line(), (v - top) / max(0.01, self.zoom)
-        self.freeze()                                       # Bilder neu einsetzen lässt das Layout kurz zusammenklappen
-        self.rescale_images()
-        seq = getattr(self, "_pinch_seq", 0)               # nicht erhöhen: das Festhalten aus pinch_apply läuft weiter
-        n = [0]
+    def on_motion(self, ctrl, x, y):
+        self._ptr_box = (x, y)
+        ok, p = self.scroll_box.compute_point(self.hscroll, Graphene.Point().init(x, y))
+        self._ptr = (p.x, p.y) if ok else None
 
-        def hold(widget=None, clock=None):
-            ok, i2 = self.buf.get_iter_at_line(line)
-            y, _h = self.view.get_line_yrange(i2)
-            want = max(0, min(y + rel * self.zoom, adj.get_upper() - adj.get_page_size()))
-            if abs(adj.get_value() - want) > 1:
-                adj.set_value(want)
-            n[0] += 1
-            if seq != self._pinch_seq or n[0] > 14:
-                self.unfreeze()
-                return GLib.SOURCE_REMOVE
-            return GLib.SOURCE_CONTINUE
-        hold()
-        self.view.add_tick_callback(hold)
-        return False
-
-    def pinch_apply(self):
-        self._pinch_id = None
-        p = self._pinch
-        if p is None:
-            return False
-        z_old, z = self.zoom, round(p["target"], 2)
-        if abs(z - z_old) < 0.01:
-            return False
-        adj = self.scroll.get_vadjustment()
-        v = adj.get_value()
-        it, top = self.view.get_line_at_y(int(v))
-        line, rel = it.get_line(), (v - top) / z_old
-        global PIX_FAST
-        PIX_FAST = True
-        try:
-            self.set_zoom(z)
-        finally:
-            PIX_FAST = False
-        self._pinch_seq = seq = getattr(self, "_pinch_seq", 0) + 1
-        t0 = time.monotonic()
-
-        def hold(widget=None, clock=None):          # Layout und Seitenumbrüche stehen erst nach und nach: Textstelle oben festhalten
-            if seq != self._pinch_seq:
-                return GLib.SOURCE_REMOVE
-            ok, i2 = self.buf.get_iter_at_line(line)
-            y, _h = self.view.get_line_yrange(i2)
-            want = max(0, min(y + rel * self.zoom, adj.get_upper() - adj.get_page_size()))
-            if abs(adj.get_value() - want) > 1:
-                adj.set_value(want)
-            busy = self._pages_id is not None or self._verify_id is not None or self._quick_id is not None
-            if time.monotonic() - t0 > 3.0 or (not busy and time.monotonic() - t0 > 0.3 and self._pinch is None):
-                return GLib.SOURCE_REMOVE
-            return GLib.SOURCE_CONTINUE
-        hold()
-        self.view.add_tick_callback(hold)
-        return False
+    def _over_pdf(self):
+        """Zeiger über einer aufgeklappten PDF? Dann zoomt Strg+Rad die PDF, nicht das Dokument."""
+        pb = getattr(self, "_ptr_box", None)
+        wd = self.scroll_box.pick(*pb, Gtk.PickFlags.DEFAULT) if pb else None
+        while wd is not None and not isinstance(wd, pdfblock.PdfBlock):
+            wd = wd.get_parent()
+        return wd is not None and wd.hsc.get_visible()
 
     def on_scroll(self, ctrl, dx, dy):
-        if ctrl.get_current_event_state() & Gdk.ModifierType.CONTROL_MASK:
-            self.step_zoom(-1 if dy > 0 else 1)
-            return True
-        return False
+        if not ctrl.get_current_event_state() & plat.primary_mask():
+            self._zoom_stop()                    # Nutzer scrollt selbst: nicht mehr festhalten
+            return False
+        if self._zp is None and self._over_pdf():
+            return False
+        # Strg+Rad/Touchpad: stufenlos. Ein Touchpad liefert viele kleine dy (auch Nachlauf mit wechselndem Vorzeichen):
+        # aufsummieren statt je Ereignis eine ganze Zoomstufe. Zoom = Startzoom · exp(−Summe·k), angewendet höchstens alle 50 ms.
+        pad = ctrl.get_unit() == Gdk.ScrollUnit.SURFACE
+        now = time.monotonic()
+        g = self._wheel
+        if g is None or now - g["t"] > 0.25:
+            g = self._wheel = {"sum": 0.0, "t": now, "z0": self._zp["target"] if self._zp else self.zoom}
+        g["t"] = now
+        g["sum"] += dy                           # Summe der Geste: Zittern hebt sich auf, Richtung = Vorzeichen der Summe
+        g["target"] = max(0.3, min(3.0, g["z0"] * math.exp(-g["sum"] * (0.012 if pad else 0.1))))
+        self._zoom_live(g["target"], getattr(self, "_ptr", None))
+        return True
+
+    def _zoom_live(self, z, pt=None, idle=0.12):
+        """Laufende Geste (Rad, Touchpad, Pinch, Regler) und Zoomknöpfe: erst nur das Standbild weich skalieren (jedes Bild),
+        das echte Layout folgt, wenn die Geste ruht (idle s) – oder zwischendurch, wenn sie lange dauert."""
+        z = max(0.3, min(3.0, z))
+        zp = self._zp
+        if zp is None:
+            if self.flow or self.hscroll.get_width() <= 0:   # fließend bricht neu um: Standbild passt nicht → direkt
+                return self.zoom_to(z, pt, fast=True)
+            pic = self._zp_pic()
+            if pic is None:
+                return self.zoom_to(z, pt, fast=True)
+            pt = pt or (self.hscroll.get_width() / 2, self.hscroll.get_height() / 2)
+            zp = self._zp = {"base": self.zoom, "shown": self.zoom, "pt": pt, "pic": pic, "commit": False,
+                             "t": time.monotonic(), "t_base": time.monotonic(), "frame": None}
+            zp["left0"], zp["P0"] = self._page_left(), self.geo.get("page_w", 0)
+            self.zprev.pic = pic
+            self._zp_draw()
+            self.zprev.set_visible(True)
+            self.hscroll.set_opacity(0)
+            self._zp_id = self.view.add_tick_callback(self._zp_tick)
+        zp["target"], zp["t"], zp["idle"] = z, time.monotonic(), idle
+        self.zoom_btn.set_label(f"{round(z * 100)} %")
+
+    def _zp_pic(self):
+        """Standbild der Ansicht (auch wenn sie gerade unsichtbar ist: kurz sichtbar schalten, es wird nichts gemalt)."""
+        op = self.hscroll.get_opacity()
+        self.hscroll.set_opacity(1)
+        try:
+            return Gtk.WidgetPaintable.new(self.hscroll).get_current_image()
+        except Exception:
+            return None
+        finally:
+            self.hscroll.set_opacity(op)
+
+    def _page_left(self):
+        g = self.geo
+        return g.get("side", 16) - self.hscroll.get_hadjustment().get_value()
+
+    def _zp_draw(self):
+        """Abbildung Standbild → Bildschirm wie das echte Layout: senkrecht bleibt die Zeile unter pt stehen; waagerecht
+        auch, außer die Seite wird schmaler als das Fenster (dann mittig) oder stößt an den Rand (Scrollgrenze)."""
+        zp = self._zp
+        s = zp["shown"] / zp["base"]
+        W = self.hscroll.get_width()
+        P = zp["P0"] * s                               # Seitenbreite des Standbilds (geo gilt nach dem Festschreiben schon neu)
+        px, py = zp["pt"]
+        L0 = zp["left0"]
+        if P + 32 <= W:
+            L = (W - P) / 2
+        else:
+            L = min(16, max(W - 16 - P, px - s * (px - L0)))
+        self.zprev.s = s
+        self.zprev.map = (L, L0, py, py)
+        self.zprev.queue_draw()
+
+    def _zp_tick(self, widget, clock):
+        zp = self._zp
+        if zp is None:
+            return GLib.SOURCE_REMOVE
+        t = clock.get_frame_time() / 1e6
+        dt = 0.016 if zp["frame"] is None else max(0.0, t - zp["frame"])
+        zp["frame"] = t
+        d = zp["target"] - zp["shown"]
+        zp["shown"] = zp["target"] if abs(d) < 0.0015 else zp["target"] - d * math.exp(-dt / 0.055)
+        self._zp_draw()
+        now = time.monotonic()
+        if zp["commit"]:
+            ready = not self._zhold_id or (self._pages_id is None and self._quick_id is None and self._zcalm >= 1)
+            if not ready:                              # echtes Layout rechnet noch
+                return GLib.SOURCE_CONTINUE
+            zp["commit"] = False
+            if abs(zp["target"] - self.zoom) < 0.006 and now - zp["t"] > zp["idle"]:
+                self._zp_end()                         # fertig: echte Ansicht zeigen
+                return GLib.SOURCE_REMOVE
+            pic = self._zp_pic()                        # Geste geht weiter: neues Standbild vom fertigen Layout
+            if pic is not None:
+                zp.update(pic=pic, base=self.zoom, left0=self._page_left(), P0=self.geo.get("page_w", 0), t_base=now)
+                self.zprev.pic = pic
+                self._zp_draw()
+            return GLib.SOURCE_CONTINUE
+        resting = zp["shown"] == zp["target"] and now - zp["t"] > zp["idle"]
+        long_way = now - zp["t_base"] > 0.35 and abs(math.log(zp["shown"] / zp["base"])) > 0.25
+        if resting or long_way:
+            z = zp["target"] if resting else zp["shown"]
+            if abs(round(z, 2) - self.zoom) >= 0.001:
+                zp["commit"] = True
+                self.zoom_to(z, zp["pt"], fast=False)
+            elif resting:
+                self._zp_end()
+                return GLib.SOURCE_REMOVE
+        return GLib.SOURCE_CONTINUE
+
+    def _zp_end(self):
+        if self._zp is None:
+            return
+        self._zp = None
+        self.zprev.set_visible(False)
+        self.zprev.pic = None
+        if not self._zfrozen:
+            self.hscroll.set_opacity(1)
+
+    def _zp_finish(self):
+        """Nutzer scrollt/tippt mitten in der Animation: sofort echtes Layout zeigen."""
+        zp = self._zp
+        if zp is None:
+            return
+        if abs(round(zp["target"], 2) - self.zoom) >= 0.001:
+            self.zoom_to(zp["target"], zp["pt"], fast=True)
+        self.view.remove_tick_callback(self._zp_id)
+        self._zp_end()
+
+    def _zoom_anchor(self, pt=None):
+        """Fensterpunkt (Koordinaten von hscroll; None = Mitte) → Anker: Zeichen + Abstand dazu in Dokument-Einheiten.
+        Liegt der Punkt im Seitenzwischenraum über einer Zeile, zählt der feste Teil (PAGE_GAP) ungezoomt."""
+        if pt is None:
+            pt = (self.hscroll.get_width() / 2, self.hscroll.get_height() / 2)
+        ok, p = self.hscroll.compute_point(self.view, Graphene.Point().init(*pt))
+        if not ok:
+            return None
+        bx, by = self.view.window_to_buffer_coords(Gtk.TextWindowType.WIDGET, int(p.x), int(p.y))
+        bx, by = bx + p.x - int(p.x), by + p.y - int(p.y)
+        ok, it = self.view.get_iter_at_location(int(bx), int(by))
+        r = self.view.get_iter_location(it)
+        z = max(0.01, self.zoom)
+        fy, fixed = (by - r.y) / z, 0.0
+        if by < r.y and not self.flow and self.geo.get("mt") is not None:
+            d = r.y - by                          # über der Zeile: obere Seitenränder skalieren, die Lücke dazwischen nicht
+            top = self.geo["mt"]
+            if d > top:
+                fixed = min(d - top, PAGE_GAP)
+                fy = -(d - fixed) / z
+        return {"off": it.get_offset(), "fx": (bx - r.x) / z, "fy": fy, "fixed": fixed, "win": tuple(pt)}
+
+    def _anchor_now(self, a):
+        """Wo steht der Anker gerade (hscroll-Koordinaten)?"""
+        it = self.buf.get_iter_at_offset(min(a["off"], self.buf.get_char_count()))
+        r = self.view.get_iter_location(it)
+        bx = r.x + a["fx"] * self.zoom
+        by = r.y + a["fy"] * self.zoom - a["fixed"]
+        wx, wy = self.view.buffer_to_window_coords(Gtk.TextWindowType.WIDGET, int(bx), int(by))
+        ok, p = self.view.compute_point(self.hscroll, Graphene.Point().init(wx + bx - int(bx), wy + by - int(by)))
+        return (p.x, p.y) if ok else None
+
+    def _anchor_fix(self, a):
+        pos = self._anchor_now(a)
+        if pos is None:
+            return None
+        for adj, d in ((self.scroll.get_vadjustment(), pos[1] - a["win"][1]),
+                       (self.hscroll.get_hadjustment(), pos[0] - a["win"][0])):
+            if abs(d) > 0.5:
+                v = max(adj.get_lower(), min(adj.get_value() + d, adj.get_upper() - adj.get_page_size()))
+                if abs(v - adj.get_value()) > 0.01:
+                    adj.set_value(v)
+        return pos
+
+    def _zoom_hold(self, a):
+        """Genau ein Halter: führt die Ansicht senkrecht und waagerecht nach, bis Layout und Seitenumbrüche zweimal
+        hintereinander gleich sind (oder 3 s nach dem letzten Zoom). Endet ein Schärfen darunter, verschwindet das Standbild."""
+        if a is None:
+            return
+        self._zanchor = a
+        self._zcalm, self._zkey = 0, None
+        self._zend = time.monotonic() + 3.0
+        self.view._no_follow_until = self._zend
+        self._anchor_fix(a)
+        if not self._zhold_id:
+            self._zhold_id = self.view.add_tick_callback(self._zoom_hold_tick)
+        self._clock_hook()
+
+    def _clock_hook(self):
+        """Der Tick läuft VOR dem Layout: das erste Bild nach einer Zoomänderung wäre sonst einmal verrutscht. Nach dem
+        Layout korrigiert, rechnet GTK das Layout im selben Bild noch einmal (Layout-Schleife der Frame-Clock). Nach dem
+        Malen wird die Stelle in der Bildmitte gemerkt – Ausgangspunkt, wenn sich die Fensterbreite bei „Seitenbreite“ ändert."""
+        clock = self.view.get_frame_clock()
+        if clock is not None and getattr(self, "_zclock", None) is not clock:
+            self._zclock = clock
+            clock.connect_after("layout", self._on_clock_layout)
+            clock.connect("after-paint", self._on_clock_painted)
+
+    def _on_clock_layout(self, clock):
+        n = clock.get_frame_counter()
+        if self._zfix_frame != n:
+            self._zfix_frame, self._zfix_n = n, 0
+        if self._fit_pending:
+            self._fit_pending = False
+            self._fit_now()
+        if self._zanchor is not None and self._zfix_n < 2:      # höchstens zweimal je Bild (GTK gibt nach 4 Runden auf)
+            self._zfix_n += 1
+            self._anchor_fix(self._zanchor)
+
+    def _on_clock_painted(self, clock):
+        if self._zanchor is not None or self._zfrozen or self._loading or self.flow:
+            return
+        key = (self.scroll.get_vadjustment().get_value(), self.hscroll.get_hadjustment().get_value(), self.zoom,
+               self.hscroll.get_width(), self.hscroll.get_height(), self.buf.get_char_count())
+        if key != self._calm_key:
+            self._calm_key = key
+            self._calm = self._zoom_anchor(None)
+
+    def _fit_now(self):
+        """„Seitenbreite“ und die Fensterbreite hat sich geändert: noch im selben Bild zoomen (sonst bricht der Text erst
+        beim alten Zoom um und springt), Anker = Stelle, die vorher in der Mitte stand."""
+        if not self.fit or self.flow:
+            return
+        t = self._fit_target()
+        if t is None or abs(t - self.zoom) <= 0.006:
+            return
+        a = self._calm or self._zoom_anchor(None)
+        if a is not None:
+            a = dict(a, win=(self.hscroll.get_width() / 2, a["win"][1]))
+        self.zoom_to(t, fast=True, user=False, anchor=a)
+
+    def _zoom_hold_tick(self, widget=None, clock=None):
+        a = self._zanchor
+        pos = self._anchor_fix(a) if a else None
+        busy = (self._pages_id is not None or self._verify_id is not None or self._quick_id is not None
+                or self._fit_id is not None or self._live_id is not None or self._sharp_id is not None
+                or self._pinch is not None)
+        vadj, hadj = self.scroll.get_vadjustment(), self.hscroll.get_hadjustment()
+        key = (round(vadj.get_upper()), round(hadj.get_upper()), len(self.pages or ()),
+               None if pos is None else (round(pos[0]), round(pos[1])))
+        self._zcalm = self._zcalm + 1 if key == self._zkey and not busy else 0
+        self._zkey = key
+        if self._zcalm >= 2 or time.monotonic() > self._zend or a is None:
+            self._zhold_id = 0
+            self._zanchor = None
+            self.view._no_follow_until = 0
+            if self._zfrozen:
+                self._zfrozen = False
+                self.unfreeze()
+            return GLib.SOURCE_REMOVE
+        return GLib.SOURCE_CONTINUE
+
+    def _zoom_stop(self):
+        self._zp_finish()
+        if self._zhold_id:
+            self.view.remove_tick_callback(self._zhold_id)
+            self._zhold_id = 0
+            self._zanchor = None
+            self.view._no_follow_until = 0
+            if self._zfrozen:
+                self._zfrozen = False
+                self.unfreeze()
+
+    def _zoom_sharpen(self):
+        """Nach einer Geste: Bilder in voller Schärfe neu einsetzen – hinter einem Standbild, unter demselben Halter."""
+        if self._pinch is not None or self._live_id is not None:
+            return GLib.SOURCE_CONTINUE          # Geste läuft noch
+        self._sharp_id = None
+        if self._zanchor is None:
+            self._zanchor = self._zoom_anchor(getattr(self, "_zlast_pt", None))
+        if not self._zfrozen:
+            self.freeze()
+            self._zfrozen = True
+        self.rescale_images()
+        self._zoom_hold(self._zanchor)
+        return GLib.SOURCE_REMOVE
+
+    def zoom_to(self, z, pt=None, fast=False, user=True, anchor=None):
+        """Zoom setzen und dabei die Textstelle unter pt (Zeiger/Fingermitte, sonst Bildmitte) festhalten."""
+        global PIX_FAST
+        z = round(max(0.3, min(3.0, z)), 2)
+        if abs(z - self.zoom) < 0.001 and not (user and self.fit):
+            return
+        a = anchor or self._zanchor
+        if anchor is None:                       # während eines Halts an derselben Stelle: Anker behalten (Layout noch unfertig)
+            q = pt or (self.hscroll.get_width() / 2, self.hscroll.get_height() / 2)
+            if a is None or math.hypot(q[0] - a["win"][0], q[1] - a["win"][1]) > 6:
+                a = self._zoom_anchor(q)
+        self._zlast_pt = pt
+        PIX_FAST = fast and bool(self.images)
+        try:
+            self.set_zoom(z, user=user)
+        finally:
+            PIX_FAST = False
+        if fast and self.images:
+            if self._sharp_id is not None:
+                GLib.source_remove(self._sharp_id)
+            self._sharp_id = GLib.timeout_add(200, self._zoom_sharpen)
+        self._zoom_hold(a)
 
     def focus_text(self):
         self.view.grab_focus()
@@ -4519,6 +4903,7 @@ class Writer(ImageObjects, ReviewMixin, Gtk.Box):
     def on_buffer_changed(self, buf):
         if not self._loading:
             self._sticky = False
+            self._zoom_stop()                    # Tippen: Mitscrollen zum Cursor hat Vorrang vor dem Zoom-Anker
         if not self._loading and not self._quiet:
             self._numbers = None
             self.changed()
@@ -4587,8 +4972,8 @@ class Writer(ImageObjects, ReviewMixin, Gtk.Box):
         px = 96 / 25.4
         pw, ph = w_mm * px, h_mm * px
         if self.fit:                         # Zoom aus der Fensterbreite: erst nach kurzer Ruhe anwenden (Bilder werden neu gerechnet)
-            target = max(0.3, min(3.0, round((width - 2 * 16) / pw, 2)))
-            if abs(target - self.zoom) > 0.004 and self._fit_id is None:
+            target = self._fit_target()
+            if target is not None and abs(target - self.zoom) > 0.006 and self._fit_id is None:
                 self._fit_id = GLib.timeout_add(120, self._apply_fit)
         page_w = pw * self.zoom              # Papier und Schrift bekommen denselben Faktor (self.zoom)
         scale = 1.0
@@ -5046,11 +5431,21 @@ class Writer(ImageObjects, ReviewMixin, Gtk.Box):
         self.apply_paper()
         self.focus_text()
 
+    def _fit_target(self):
+        """Zoom für „Seitenbreite“. Gerechnet wird mit der Breite OHNE Scrollleiste – ob die Leiste gerade sichtbar ist,
+        hängt selbst vom Zoom ab (Seitenzahl), sonst schaukeln sich Zoom und Leiste gegenseitig auf."""
+        w = self.hscroll.get_width()
+        if w <= 0:
+            return None
+        bar = self.vbar.measure(Gtk.Orientation.HORIZONTAL, -1)[1]
+        w = w + (self.vbar.get_width() if self.vbar.get_visible() else 0) - bar
+        return max(0.3, min(3.0, round((w - 2 * 16) / (df.page_mm(self.page)[0] * 96 / 25.4), 2)))
+
     def _apply_fit(self):
         self._fit_id = None
-        w = self.view.get_width()
-        if self.fit and not self.flow and w > 0:
-            self.set_zoom((w - 2 * 16) / (df.page_mm(self.page)[0] * 96 / 25.4), user=False)
+        t = self._fit_target()
+        if self.fit and not self.flow and t is not None and abs(t - self.zoom) > 0.006:
+            self.zoom_to(t, None, user=False)
         return False
 
     def set_zoom(self, z, user=True):
@@ -5078,10 +5473,12 @@ class Writer(ImageObjects, ReviewMixin, Gtk.Box):
 
     def step_zoom(self, d):
         cur = self.zoom
+        if self._zp is not None:                      # schnell hintereinander gedrückt: vom Ziel der laufenden Animation aus
+            cur = self._zp["target"]
         if d > 0:
-            self.set_zoom(next((z for z in ZOOMS if z > cur + 0.001), cur * 1.1))
+            self._zoom_live(next((z for z in ZOOMS if z > cur + 0.001), cur * 1.1), idle=0.0)
         else:
-            self.set_zoom(next((z for z in reversed(ZOOMS) if z < cur - 0.001), cur / 1.1))
+            self._zoom_live(next((z for z in reversed(ZOOMS) if z < cur - 0.001), cur / 1.1), idle=0.0)
 
     def rescale_images(self):
         """Bilder passend zum Zoom neu einsetzen (Paintables haben eine feste Größe)."""

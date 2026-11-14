@@ -5,6 +5,7 @@
 # Gespeichert wird automatisch. Daten: ~/.local/share/notes/data/{notes,docs,latex}/*.json (siehe store.py).
 # Google-Keep-Abgleich (nur Notizen): siehe sync.py.
 import datetime, json, os, re, sys, time
+T_START = time.monotonic()
 if os.name == "nt":   # Windows/MSYS2: Hilfsprogramme liegen neben python.exe – die Startmenü-Verknüpfung setzt kein PATH
     os.environ["PATH"] = os.path.dirname(sys.executable) + os.pathsep + os.environ.get("PATH", "")
 
@@ -22,12 +23,13 @@ sys.path.insert(1, os.path.expanduser("~/.local/share/scourge"))
 sys.path.insert(2, os.path.expanduser("~/.local/share/rice-apps"))
 sys.path.append(os.path.join(HERE, "vendor"))
 import paths  # noqa: E402
+from core import plat
 import i18n  # noqa: E402
 
 
 def _early_lang():
     try:
-        with open(paths.PREFS) as f:
+        with open(paths.PREFS, encoding="utf-8") as f:
             return json.load(f).get("lang", "de")
     except (OSError, ValueError):
         return "de"
@@ -52,6 +54,20 @@ def load_icon_font():
             return bool(fm.add_font_file(ICON_FONT))
     except Exception:
         pass
+    if sys.platform == "darwin":          # Pango/CoreText kennt add_font_file nicht immer → Schrift beim System für diesen Prozess anmelden
+        try:
+            import ctypes
+            ct = ctypes.CDLL("/System/Library/Frameworks/CoreText.framework/CoreText")
+            cf = ctypes.CDLL("/System/Library/Frameworks/CoreFoundation.framework/CoreFoundation")
+            cf.CFURLCreateFromFileSystemRepresentation.restype = ctypes.c_void_p
+            cf.CFURLCreateFromFileSystemRepresentation.argtypes = [ctypes.c_void_p, ctypes.c_char_p, ctypes.c_long, ctypes.c_bool]
+            ct.CTFontManagerRegisterFontsForURL.restype = ctypes.c_bool
+            ct.CTFontManagerRegisterFontsForURL.argtypes = [ctypes.c_void_p, ctypes.c_int, ctypes.c_void_p]
+            raw = ICON_FONT.encode()
+            url = cf.CFURLCreateFromFileSystemRepresentation(None, raw, len(raw), False)
+            return bool(ct.CTFontManagerRegisterFontsForURL(url, 1, None))     # 1 = kCTFontManagerScopeProcess
+        except Exception:
+            return False
     try:
         import ctypes, ctypes.util
         fc = ctypes.CDLL(ctypes.util.find_library("fontconfig") or "libfontconfig.so.1")
@@ -66,6 +82,7 @@ load_icon_font()
 import store as st  # noqa: E402
 import glass  # noqa: E402
 import docfmt as df  # noqa: E402
+import pdfblock
 import writer as wr  # noqa: E402
 import spell  # noqa: E402
 import latex as lx  # noqa: E402
@@ -94,14 +111,14 @@ except Exception:  # … sonst die mitgelieferte Kopie
 APP_ID = os.environ.get("NOTES_APP_ID", "de.invincible.Notist")
 GLib.set_prgname(APP_ID)   # auch Nebenfenster (Einstellungen, Verlauf …) melden sich als notist beim Fenstermanager
 try:
-    VERSION = open(os.path.join(HERE, "VERSION")).read().strip()
+    with open(os.path.join(HERE, "VERSION"), encoding="utf-8") as _vf:
+        VERSION = _vf.read().strip()
 except OSError:
     VERSION = "?"
 ICON_DIR = os.path.expanduser("~/.local/share/icons/hicolor/scalable/apps")
 SHORT_H = 600              # darunter (z. B. Viertel-Kachel): Words-Menüband eingeklappt
 COMPACT_W = 960            # darunter (z. B. halber Bildschirm): Liste wandert in ein Dropdown oben
 BOX_OPEN, BOX_DONE = "☐", "☑"   # Checklisten: echtes Zeichen am Zeilenanfang, damit Text/Suche/Keep es verstehen
-import paths  # noqa: E402
 DOCS = paths.DOCS
 LATEX = paths.LATEX
 KINDS = {  # Modus → (Titel, Icon, Tooltip, Einzahl, Mehrzahl)
@@ -440,14 +457,7 @@ popover.file-menu .fm-sub { margin-top: 1px; }
 
 
 
-def tiling_desktop():
-    """Kachel-Fenstermanager (Hyprland, Sway, …) zeichnen Rahmen selbst – dort ohne Titelleiste.
-    Auf GNOME, KDE & Co. behält das Fenster seine normale Titelleiste (Schließen, Verschieben)."""
-    env = os.environ
-    if env.get("HYPRLAND_INSTANCE_SIGNATURE") or env.get("SWAYSOCK") or env.get("NIRI_SOCKET"):
-        return True
-    desk = env.get("XDG_CURRENT_DESKTOP", "").lower()
-    return any(d in desk for d in ("hyprland", "sway", "river", "niri", "wayfire", "i3", "bspwm", "qtile"))
+tiling_desktop = plat.tiling_desktop
 
 
 def install_logo():
@@ -457,8 +467,8 @@ def install_logo():
     src = os.path.join(HERE, "logo", "notist.svg")
     dst = os.path.join(ICON_DIR, "notist.svg")
     try:
-        data = open(src, "rb").read()
-        if not os.path.isfile(dst) or open(dst, "rb").read() != data:
+        data = paths.read_file(src, True)
+        if not os.path.isfile(dst) or paths.read_file(dst, True) != data:
             os.makedirs(ICON_DIR, exist_ok=True)
             with open(dst, "wb") as f:
                 f.write(data)
@@ -481,6 +491,10 @@ MIME_XML = f"""<?xml version="1.0" encoding="UTF-8"?>
 
 def install_mime():
     """.notes-Dateien als eigenen Dateityp anmelden: Doppelklick im Dateimanager öffnet notist (im Hintergrund)."""
+    plat.register_filetypes(_install_mime_linux)
+
+
+def _install_mime_linux():
     import shutil, subprocess, threading
 
     def run():
@@ -488,9 +502,9 @@ def install_mime():
         changed = False
         xml = os.path.join(share, "mime", "packages", "notes-share.xml")
         try:
-            if not os.path.isfile(xml) or open(xml).read() != MIME_XML:
+            if not os.path.isfile(xml) or paths.read_file(xml) != MIME_XML:
                 os.makedirs(os.path.dirname(xml), exist_ok=True)
-                with open(xml, "w") as f:
+                with open(xml, "w", encoding="utf-8") as f:
                     f.write(MIME_XML)
                 changed = True
             icon = os.path.join(share, "icons", "hicolor", "scalable", "mimetypes", "application-x-notes-share.svg")
@@ -500,7 +514,7 @@ def install_mime():
                 shutil.copyfile(src, icon)
             desk = os.path.join(share, "applications", "notist.desktop")
             if os.path.isfile(desk):
-                lines = open(desk).read().split("\n")
+                lines = paths.read_file(desk).split("\n")
                 out, has = [], False
                 for l in lines:
                     if l.startswith("MimeType="):
@@ -513,7 +527,7 @@ def install_mime():
                     out.insert(next((i + 1 for i, l in enumerate(out) if l.startswith("Exec=")), len(out)), f"MimeType={MIME};")
                     changed = True
                 if changed:
-                    with open(desk, "w") as f:
+                    with open(desk, "w", encoding="utf-8") as f:
                         f.write("\n".join(out))
             if changed:
                 for cmd in (["update-mime-database", os.path.join(share, "mime")],
@@ -541,16 +555,12 @@ def nice_date(iso):
     return f"{d:%d.%m.%Y}"
 
 
-ERROR_LOG = os.path.join(os.environ.get("XDG_CACHE_HOME") or os.path.expanduser("~/.cache"), "notes", "fehler.log")
+ERROR_LOG = os.path.join(plat.cache_dir(), "fehler.log")
 
 
 def limit_arenas():
     """glibc legt pro Thread eine eigene Speicher-Arena an und gibt sie kaum zurück – zwei genügen."""
-    try:
-        import ctypes
-        ctypes.CDLL("libc.so.6").mallopt(-8, 2)       # M_ARENA_MAX
-    except Exception:  # noqa: BLE001
-        pass
+    plat.limit_arenas()
 
 
 limit_arenas()
@@ -559,11 +569,7 @@ limit_arenas()
 def trim_memory():
     """Freigegebenen Arbeitsspeicher ans System zurückgeben (glibc behält große Brocken sonst: 16-MB-Dokumente
     erzeugen bei jedem Speichern/Laden solche)."""
-    try:
-        import ctypes
-        ctypes.CDLL("libc.so.6").malloc_trim(0)
-    except Exception:  # noqa: BLE001
-        pass
+    plat.release_memory()
 
 
 def log_error(what):
@@ -609,15 +615,8 @@ def popup_at(pop, widget, x, y, stable=None):
 
 
 def show_in_files(path):
-    """Datei im Dateimanager zeigen (markiert, über org.freedesktop.FileManager1), sonst den Ordner öffnen."""
-    uri = Gio.File.new_for_path(path).get_uri()
-    try:
-        bus = Gio.bus_get_sync(Gio.BusType.SESSION, None)
-        bus.call_sync("org.freedesktop.FileManager1", "/org/freedesktop/FileManager1",
-                      "org.freedesktop.FileManager1", "ShowItems", GLib.Variant("(ass)", ([uri], "")),
-                      None, Gio.DBusCallFlags.NONE, 3000, None)
-    except Exception:  # noqa: BLE001 – kein Dateimanager mit dieser Schnittstelle
-        Gio.AppInfo.launch_default_for_uri(Gio.File.new_for_path(os.path.dirname(path)).get_uri(), None)
+    """Datei im Dateimanager zeigen (markiert), sonst den Ordner öffnen."""
+    plat.reveal(path)
 
 
 def is_empty(n):
@@ -631,7 +630,8 @@ def font_choices():
     def first(*names):
         return next((n for n in names if n in have), None)
     out = [("Standard", None)]
-    for label, cands in (("Sans", ("Noto Sans", "DejaVu Sans")), ("Serif", ("Noto Serif", "DejaVu Serif")),
+    for label, cands in (("Sans", ("Noto Sans", "DejaVu Sans", "Helvetica Neue", "Segoe UI")),
+                         ("Serif", ("Noto Serif", "DejaVu Serif", "Georgia", "Cambria")),
                          ("Plakativ", ("Anton",))):
         fam = first(*cands)
         if fam:
@@ -739,7 +739,7 @@ class Notes(Gtk.Application):
 
     def load_prefs(self):
         try:
-            with open(PREFS) as f:
+            with open(PREFS, encoding="utf-8") as f:
                 return json.load(f)
         except FileNotFoundError:
             return {}
@@ -755,7 +755,7 @@ class Notes(Gtk.Application):
         try:
             os.makedirs(os.path.dirname(PREFS), exist_ok=True)
             tmp = PREFS + ".tmp"
-            with open(tmp, "w") as f:
+            with open(tmp, "w", encoding="utf-8") as f:
                 json.dump(self.prefs, f, indent=1)
             os.replace(tmp, PREFS)               # nie halb geschrieben
         except OSError:
@@ -782,6 +782,11 @@ class Notes(Gtk.Application):
 
     def do_startup(self):
         Gtk.Application.do_startup(self)
+        if plat.SYSTEM != "linux" and not getattr(self, "_inst_srv", None):     # Mac/Windows: kein D-Bus → eigener Socket
+            try:
+                self._inst_srv = plat.serve_instance(lambda argv: GLib.idle_add(self.handle_forwarded, argv))
+            except OSError:
+                self._inst_srv = None
         quit_act = Gio.SimpleAction.new("quit", None)
         quit_act.connect("activate", self.really_quit)
         self.add_action(quit_act)
@@ -803,6 +808,10 @@ class Notes(Gtk.Application):
         getattr(glass, "bring_here", lambda w: None)(self.win)   # offen auf anderem Arbeitsbereich → hierher holen
         self.win.present()
         GLib.idle_add(self.on_shown)
+        broken = [f for s in self.stores.values() for f in s.broken]
+        if broken and not getattr(self, "_broken_told", False):      # kaputte Dateien: sagen statt verschweigen
+            self._broken_told = True
+            GLib.timeout_add(1200, lambda: (self.notify(f"{len(broken)} kaputte Notiz(en) nach data/kaputt/ verschoben"), False)[-1])
         if first:      # erster Start (z. B. bei Freunden): Willkommens-Eintrag + Hinweis auf Design & Sprache
             GLib.timeout_add(700, lambda: (self.create_welcome(), False)[-1])
             GLib.timeout_add(1600, lambda: (self.notify("Willkommen! Design und Sprache findest du in den "
@@ -858,6 +867,9 @@ class Notes(Gtk.Application):
 
     def on_shown(self):
         """Fenster (wieder) sichtbar: neue Dateien im notist-Ordner aufnehmen, offene Datei ggf. neu einlesen."""
+        if os.environ.get("NOTES_TIMING") and not getattr(self, "_timed", False):
+            self._timed = True            # Startzeit: Import bis Fenster sichtbar (für Mac-CI-Log)
+            print(f"notist-timing: Fenster nach {time.monotonic() - T_START:.2f} s sichtbar", file=sys.stderr, flush=True)
         try:
             import a11y
             a11y.label_tree(self.win)
@@ -888,6 +900,73 @@ class Notes(Gtk.Application):
         changelog.open_window(parent or self.win, "notist", os.path.join(HERE, "CHANGELOG.md"), key="notist",
                               version=VERSION, colors_css=colors)
 
+    def handle_forwarded(self, argv):
+        """Ein zweiter Start (Mac/Windows) hat seine Argumente hierher geschickt (siehe plat.forward_to_running)."""
+        def arg(flag):
+            return argv[argv.index(flag) + 1] if flag in argv and len(argv) > argv.index(flag) + 1 else ""
+        if "--quit" in argv:
+            self.activate_action("quit", None)
+        elif "--remind" in argv:
+            self.activate_action("remind", GLib.Variant("s", arg("--remind")))
+        elif "--note" in argv:
+            self.activate_action("open-note", GLib.Variant("s", arg("--note")))
+        elif "--settings" in argv:
+            self.activate_action("open-settings", GLib.Variant("s", arg("--settings")))
+        elif "--daemon" in argv:
+            pass
+        else:
+            files = [a for a in argv if not a.startswith("-") and os.path.isfile(a)]
+            if files:
+                self.do_open([Gio.File.new_for_path(os.path.abspath(p)) for p in files], len(files), "")
+            else:
+                self.do_activate()
+        return False
+
+    def poll_appearance(self):
+        """Mac: Hell/Dunkel des Systems alle paar Sekunden prüfen (solange das Fenster sichtbar ist) und live umschalten."""
+        if not (self.win and self.win.get_visible()) or not self.prefs.get("follow_system", True):
+            return True
+        now = plat.system_is_light()
+        if now is not None and now != getattr(self, "_sys_light", None):
+            first = getattr(self, "_sys_light", None) is None
+            self._sys_light = now
+            if not first:
+                self.load_css()
+        return True
+
+    def mac_menu(self):
+        """Menüleiste am Mac (GTK setzt sie in die Systemleiste). Nur Einträge, die es als Aktion schon gibt; die Kürzel
+        zeigt GTK aus den Tastenbelegungen an. Texte laufen über i18n.tr (Englisch aus lang/en.json)."""
+        tr = i18n.tr
+
+        def section(*items):
+            sec = Gio.Menu()
+            for label, action in items:
+                sec.append(tr(label), action)
+            return sec
+
+        def sub(title, *sections):
+            m = Gio.Menu()
+            for sec in sections:
+                m.append_section(None, sec)
+            top.append_submenu(tr(title), m)
+
+        top = Gio.Menu()
+        sub("Ablage", section(("Neu", "win.new"), ("Datei öffnen …", "win.doc-import"), ("Drucken …", "win.doc-print")),
+            section(("Zur Übersicht / Reiter schließen", "win.back-home")))
+        sub("Bearbeiten", section(("Im Eintrag suchen", "win.find"), ("In allen suchen", "win.find-all")),
+            section(("Fett", "win.bold"), ("Kursiv", "win.italic"), ("Unterstrichen", "win.underline"),
+                    ("Durchgestrichen", "win.strike"), ("Checkliste", "win.checklist")),
+            section(("Einstellungen …", "win.settings")))
+        sub("Ansicht", section(("Übersicht", "win.mode-home"), ("Notizen", "win.mode-notes"), ("Words", "win.mode-docs"),
+                               ("LaTeX", "win.mode-latex")),
+            section(("Übersetzer", "win.translator"), ("Archiv", "win.archive"), ("Verlauf", "win.history")),
+            section(("Vollbild", "win.fullscreen")))
+        sub("Fenster", section(("Nächster Reiter", "win.tab-next"), ("Vorheriger Reiter", "win.tab-prev"),
+                               ("Zuletzt geöffnete Datei", "win.last-file")))
+        sub("Hilfe", section(("Tastenkürzel", "win.shortcuts")))
+        return top
+
     def do_open(self, files, n, hint):
         """notes datei.docx / datei.tex – auch über „Öffnen mit“ im Dateimanager."""
         self.do_activate()
@@ -898,6 +977,7 @@ class Notes(Gtk.Application):
 
     def load_css(self, *_):
         import themes
+        themes.FOLLOW_SYSTEM = plat.can_follow_system() and self.prefs.get("follow_system", True)
         css, light = themes.resolve()           # gewähltes Design, sonst Desktop-Farben (hell/dunkel nach Wahl)
         try:                                    # GTK-Grundthema (Auswahllisten, Menüs) passend hell/dunkel
             Gtk.Settings.get_default().set_property("gtk-application-prefer-dark-theme", not light)
@@ -945,7 +1025,7 @@ class Notes(Gtk.Application):
     def _colors_settled(self):
         self._css_timer = 0
         try:
-            src = open(MATUGEN_CSS).read()
+            src = paths.read_file(MATUGEN_CSS)
         except OSError:
             return False
         if "@define-color" not in src:          # matugen schreibt noch → gleich nochmal
@@ -980,13 +1060,22 @@ class Notes(Gtk.Application):
             themes.save(theme=self.prefs["theme"])
         self.load_css()
         self.theme_mon = themes.watch(self.load_css)        # Design in den Einstellungen irgendeiner -ist-App geändert
+        if plat.can_follow_system() and not getattr(self, "_appearance_poll", None):
+            self._sys_light = plat.system_is_light()
+            self._appearance_poll = GLib.timeout_add_seconds(int(os.environ.get("NOTES_APPEARANCE_POLL", "4")), self.poll_appearance)
+        self.start_handy()
         # Super+W: matugen schreibt colors.css (teils in mehreren Schritten, teils per Umbenennen) →
         # Ordner beobachten, entprellen, erst laden wenn die Datei vollständig ist (wie in scourge).
         self._css_timer = 0
-        self.monitor = Gio.File.new_for_path(os.path.dirname(MATUGEN_CSS)).monitor_directory(
-            Gio.FileMonitorFlags.WATCH_MOVES, None)
-        self.monitor.set_rate_limit(100)
-        self.monitor.connect("changed", self._on_colors_changed)
+        self.monitor = None
+        try:                                   # ohne matugen (Mac/Windows/GNOME) gibt es den Ordner nicht
+            if os.path.isdir(os.path.dirname(MATUGEN_CSS)):
+                self.monitor = Gio.File.new_for_path(os.path.dirname(MATUGEN_CSS)).monitor_directory(
+                    Gio.FileMonitorFlags.WATCH_MOVES, None)
+                self.monitor.set_rate_limit(100)
+                self.monitor.connect("changed", self._on_colors_changed)
+        except GLib.Error:
+            self.monitor = None
 
         self.compact = None
         self.win = NotesWindow(self.on_width, application=self, title="notist")
@@ -995,6 +1084,8 @@ class Notes(Gtk.Application):
         self.win.set_icon_name("notist")
         self.win.add_css_class("pb-window")
         self.win.connect("close-request", self.on_close)
+        self.win.connect("notify::is-active", lambda w, _p: w.is_active() and getattr(self, "handy", None)
+                         and not os.environ.get("NOTES_NO_HANDY") and self.handy.peers.on_focus())
         for name, cb, keys in (("new", self.new_note, ["<Control>n"]),
                                ("find", lambda *_: self.find_here(), ["<Control>f"]),
                                ("find-all", lambda *_: self.find_everywhere(), ["<Control><Shift>f"]),
@@ -1042,7 +1133,16 @@ class Notes(Gtk.Application):
             act = Gio.SimpleAction.new(name, None)
             act.connect("activate", cb)
             self.win.add_action(act)
-            self.set_accels_for_action(f"win.{name}", keys)
+            self.set_accels_for_action(f"win.{name}", [plat.accel(k) for k in keys])
+        if plat.SYSTEM == "mac":
+            # Cmd+Q beendet wirklich (Cmd+W schließt nur das Fenster / den Reiter); Vollbild mit Ctrl+Cmd+F wie am Mac üblich
+            self.set_accels_for_action("win.close", [])
+            self.set_accels_for_action("app.quit", ["<Meta>q"])
+            self.set_accels_for_action("win.fullscreen", ["F11", "<Control><Meta>f"])
+            try:
+                self.set_menubar(self.mac_menu())
+            except Exception as e:  # noqa: BLE001 – ohne Menüleiste läuft notist trotzdem
+                print("menubar:", e, file=sys.stderr)
         for name, cb in (("opt", lambda a, v: self.toggle_opt(v.get_string())),
                          ("doc-export", lambda a, v: self.export_dialog(v.get_string())),
                          ("export-as", lambda a, v: self.export_dialog(v.get_string())),
@@ -1186,6 +1286,9 @@ class Notes(Gtk.Application):
         gear.set_margin_start(6)
         top.append(gear)
         self.glass_btn = glass.GlassToggle(self.win)
+        if plat.SYSTEM == "mac":          # kein Blur hinter dem Fenster (nur Hyprland): Glas-Knopf weg, Fenster deckend
+            self.glass_btn.set_visible(False)
+            self.win.remove_css_class("glass")
         self.glass_btn.set_margin_start(6)
         top.append(self.glass_btn)
         if tiling_desktop():          # sonst hat das Fenster eine normale Titelleiste mit eigenem ✕
@@ -1989,7 +2092,7 @@ class Notes(Gtk.Application):
         if share.email(path, self.display_title(self.current)):
             self.notify(f"Mailprogramm geöffnet – {os.path.basename(path)} hängt an")
         else:
-            Gio.AppInfo.launch_default_for_uri(Gio.File.new_for_path(os.path.dirname(path)).get_uri(), None)
+            plat.open_external(os.path.dirname(path))
             self.notify("Kein Mailprogramm gefunden – Ordner mit der Datei geöffnet")
 
     def share_file(self):
@@ -2247,8 +2350,8 @@ class Notes(Gtk.Application):
         buf = self.text.get_buffer()
         out = []
         text = buf.get_slice(buf.get_start_iter(), buf.get_end_iter(), True)
-        for i, ch in enumerate(text):
-            if ch == "\ufffc":
+        for i, c_ in enumerate(text):
+            if c_ == "\ufffc":
                 it = buf.get_iter_at_offset(i)
                 tex = it.get_paintable()
                 if tex in self.note_images:
@@ -2517,7 +2620,7 @@ class Notes(Gtk.Application):
             if nid in store.notes:
                 n = store.notes[nid]
                 break
-        if n is None or (disk is None and n.get("reminder_done")):
+        if n is None or n.get("trashed") or (disk is None and n.get("reminder_done")):
             return
         n["reminder_done"] = True
         title = self.display_title(n, next(k for k, s in self.stores.items() if nid in s.notes))
@@ -2547,7 +2650,7 @@ class Notes(Gtk.Application):
 
     # ================= Umwandeln Words ↔ LaTeX =================
     def convert_current(self, target):
-        import convert
+        import notesconvert as convert
         n = self.current
         if not n or self.mode == "trash" or target == self.kind:
             return
@@ -2574,7 +2677,7 @@ class Notes(Gtk.Application):
             for m in re.finditer(r"\\(?:input|include)\{([^}]+)\}", src):
                 p = os.path.join(img_dir, m.group(1) if m.group(1).endswith(".tex") else m.group(1) + ".tex")
                 try:
-                    src = src.replace(m.group(0), open(p, encoding="utf-8").read())
+                    src = src.replace(m.group(0), paths.read_file(p))
                 except OSError:
                     pass
             blocks, tex_title = convert.latex_to_blocks(src, img_dir)
@@ -2716,6 +2819,23 @@ class Notes(Gtk.Application):
         self.notify("Version wiederhergestellt – die vorherige liegt im Verlauf")
 
     # ================= Einstellungen & Sicherung =================
+    def start_handy(self):
+        """Abgleich mit der Handy-App: Server läuft, sobald einmal gekoppelt wurde (prefs handy.on)."""
+        try:
+            import handylink
+            self.handy = handylink.Server(self)
+            if self.prefs.get("handy", {}).get("on") and not os.environ.get("NOTES_NO_HANDY"):
+                self.handy.start()
+            if not os.environ.get("NOTES_NO_HANDY") and not os.environ.get("NOTES_NO_TIMERS"):
+                self.handy.peers.start()                      # Abgleich mit gekoppelten Rechnern (Schritt 10)
+            act = Gio.SimpleAction.new("handy-pair", None)       # Einstellungen → Handy öffnen und Code zeigen
+            act.connect("activate", lambda *_: (self.do_activate(), self.open_settings("handy"),
+                                                 self._settings_win.handy_pair()))
+            self.add_action(act)
+        except Exception as e:  # noqa: BLE001
+            print("handy:", e, file=sys.stderr)
+            self.handy = None
+
     def open_settings(self, page=None):
         w = getattr(self, "_settings_win", None)
         if w and w.get_visible():
@@ -2792,15 +2912,32 @@ class Notes(Gtk.Application):
 
     def restore_backup(self, path):
         self.flush(force=True)
+        # Aufgeschobenes/laufendes Datei-Schreiben jetzt erledigen – sonst speichert es danach die alten
+        # Eintrags-Objekte über die zurückgespielten JSON-Dateien.
+        self.run_sync_file(wait=True)
         b = backup.defaults(self.prefs)
         try:
-            backup.restore(path, os.path.expanduser(b["dir"]))
+            backup.restore(path, os.path.expanduser(b["dir"]), backup.files_dir_of(self.prefs))
         except Exception as e:  # noqa: BLE001
             self.notify(f"Wiederherstellen fehlgeschlagen: {e}")
             return
         self.current = None
         for s in self.stores.values():
             s.load()
+        # Die Dateien selbst (~/Dokumente/notist, fremde Orte) stecken nicht in der Sicherung. Hat sich eine seitdem
+        # geändert, würde select() sie neu einlesen und der zurückgespielte Stand wäre gleich wieder weg →
+        # heutigen Dateistand unter data/originals/ sichern, dann den zurückgespielten Stand hineinschreiben.
+        for kind, s in self.stores.items():
+            for n in list(s.notes.values()):
+                f = n.get("file")
+                if not f or n.get("trashed") or not lk.differs(n, f):
+                    continue
+                try:
+                    lk.backup_original(n, again=True)
+                    lk.stamp(n, f)
+                    self.sync_file(n, kind)
+                except Exception:  # noqa: BLE001
+                    log_error("Wiederherstellen: Datei")
         self.last_sel = {}
         self.mode = "notes"
         self.apply_kind()
@@ -2929,7 +3066,7 @@ class Notes(Gtk.Application):
             self.toggle_home_expand(self.home_expanded)
 
     def on_win_key(self, ctrl, kv, code, state):
-        if kv != Gdk.KEY_Escape or state & (Gdk.ModifierType.CONTROL_MASK | Gdk.ModifierType.SHIFT_MASK |
+        if kv != Gdk.KEY_Escape or state & (plat.primary_mask() | Gdk.ModifierType.SHIFT_MASK |
                                             Gdk.ModifierType.ALT_MASK):
             return False
         if self.zen:
@@ -3370,6 +3507,12 @@ class Notes(Gtk.Application):
 
     def trash_entry(self, kind, n, with_file=False):
         """Eintrag in notists Papierkorb (mit_datei: die Datei zusätzlich in den System-Papierkorb)."""
+        if n.get("reminder_systemd"):                   # Timer anhalten; Wiederherstellen → die App erinnert selbst
+            n["reminder_systemd"] = False
+            try:
+                rem.cancel(n)
+            except Exception:  # noqa: BLE001
+                log_error("Erinnerung anhalten")
         if with_file and not lk.trash_file(n):
             self.notify(f"Konnte {os.path.basename(n.get('file') or '')} nicht in den Papierkorb legen "
                         "– nur aus notist entfernt")
@@ -3439,7 +3582,7 @@ class Notes(Gtk.Application):
         self.text.grab_focus()
 
     def on_title_key(self, ctrl, keyval, code, state):
-        if keyval == Gdk.KEY_Tab and not state & (Gdk.ModifierType.SHIFT_MASK | Gdk.ModifierType.CONTROL_MASK):
+        if keyval == Gdk.KEY_Tab and not state & (Gdk.ModifierType.SHIFT_MASK | plat.primary_mask()):
             self.focus_text()
             return True
         return False
@@ -3524,6 +3667,10 @@ class Notes(Gtk.Application):
             self.focus_search()
             return
         if self.docs:
+            pb = pdfblock.block_of(self.win.get_focus())        # Fokus in einer aufgeklappten PDF → in der PDF suchen
+            if pb is not None and pb.is_open():
+                pb.toggle_search()
+                return
             rev, entry, show, hide = self.writer.findrev, self.writer.find_entry, self.writer.show_find, self.writer.hide_find
         elif self.tex:
             rev, entry, show, hide = self.latex.findrev, self.latex.find_entry, self.latex.show_find, self.latex.hide_find
@@ -4077,7 +4224,7 @@ class Notes(Gtk.Application):
         return False
 
     def on_text_key(self, ctrl, keyval, code, state):
-        if state & Gdk.ModifierType.CONTROL_MASK and not state & Gdk.ModifierType.ALT_MASK:
+        if state & plat.primary_mask() and not state & Gdk.ModifierType.ALT_MASK:
             k = Gdk.keyval_to_lower(keyval)
             if k == Gdk.KEY_z:
                 (self.note_redo if state & Gdk.ModifierType.SHIFT_MASK else self.note_undo)()
@@ -4085,7 +4232,7 @@ class Notes(Gtk.Application):
             if k == Gdk.KEY_y:
                 self.note_redo()
                 return True
-        if self.mode == "trash" or state & (Gdk.ModifierType.CONTROL_MASK | Gdk.ModifierType.ALT_MASK):
+        if self.mode == "trash" or state & (plat.primary_mask() | Gdk.ModifierType.ALT_MASK):
             return False
         buf = self.text.get_buffer()
         if buf.get_has_selection():
@@ -4186,7 +4333,7 @@ class Notes(Gtk.Application):
         if path.lower().endswith(".notes"):
             self.import_bundle(path)
             return
-        hit = self.file_index().get(lk.norm(path))
+        hit = self.file_index().get(lk.norm(path)) or self.source_hit(path)
         if hit:                                          # schon verknüpft → diesen Eintrag öffnen
             hkind, n = hit
             if n.get("trashed"):
@@ -4223,7 +4370,7 @@ class Notes(Gtk.Application):
         n["file"] = target
         n["file_auto"] = False
         if target == path:
-            n["file_mtime"] = lk.mtime(path)
+            lk.stamp(n, path)
         else:
             n["file_ok"] = True                         # neue Datei, kein Original zu schützen
         self.store.save(n)
@@ -4270,6 +4417,20 @@ class Notes(Gtk.Application):
                     out[lk.norm(n["file"])] = (k, n)
         return out
 
+    def source_hit(self, path):
+        """Eintrag, der aus dieser Datei entstand, aber in eine andere schreibt (.doc → .docx daneben)."""
+        p = lk.norm(path)
+        for k, store in self.stores.items():
+            for n in store.notes.values():
+                if n.get("source") and n.get("file") and not n["sync"].get("delete_remote") \
+                        and lk.norm(n["source"]) == p and lk.norm(n["file"]) != p:
+                    return k, n
+        return None
+
+    def taken_paths(self, n):
+        """Dateipfade aller anderen Einträge (normiert) – auch solche, deren Datei es noch nicht gibt."""
+        return {p for p, (_k, o) in self.file_index().items() if o is not n}
+
     def write_bg(self, kind, n):
         """Datei (.docx/.odt …) in einem Hintergrund-Thread schreiben: das Zippen großer Bilder dauerte sonst Sekunden,
         in denen Cursor und Tasten standen. Läuft schon ein Schreiben, folgt danach genau ein weiteres mit dem neuesten Stand."""
@@ -4279,19 +4440,24 @@ class Notes(Gtk.Application):
             return
         self._bg_busy = True
         snap = dict(n)                       # Blöcke sind unveränderlich (flush ersetzt die Liste), Kopie genügt
+        box = {}
 
         def work():
-            err = None
             try:
                 lk.write(kind, snap)
             except (OSError, ValueError) as e:
-                err = e
-            GLib.idle_add(finish, err)
+                box["err"] = e
+            GLib.idle_add(finish)
 
-        def finish(err):
-            self._bg_busy = False
+        def finish():
+            # läuft per idle_add – oder vorher direkt aus join_bg (Beenden, Umbenennen, Neu-Einlesen); nur einmal
+            if box.get("ran"):
+                return False
+            box["ran"] = True
+            err = box.get("err")
+            self._bg_busy, self._bg_finish = False, None
             if err is None:
-                n["file_mtime"] = snap.get("file_mtime")
+                lk.copy_stamp(snap, n)
                 n.pop("file_error", None)
                 n.pop("file_missing", None)
             else:
@@ -4301,17 +4467,28 @@ class Notes(Gtk.Application):
                 n["file_error"] = str(err)
             self.stores[kind].save(n, touch=False)
             again, self._bg_again = getattr(self, "_bg_again", None), None
-            if again:
-                self.write_bg(*again)
+            if again:                                  # über sync_file: holt auch ein aufgeschobenes Umbenennen nach
+                self.sync_file(again[1], again[0], bg=True)
             return False
+        self._bg_finish, self._bg_path = finish, snap.get("file")
         self._bg_thread = threading.Thread(target=work, daemon=True)
         self._bg_thread.start()
 
     def join_bg(self):
-        """Vor dem Beenden: laufendes Hintergrund-Schreiben abwarten."""
-        t = getattr(self, "_bg_thread", None)
-        if t is not None and t.is_alive():
-            t.join(20)
+        """Laufendes Hintergrund-Schreiben abwarten UND abschließen: Dateistand (file_mtime) merken und einen
+        nachgereichten neueren Stand (_bg_again) noch schreiben. Nötig vor Beenden (die Hauptschleife ruft finish()
+        dann nicht mehr), vor Umbenennen/Verschieben (sonst schreibt der Faden an den alten Pfad) und vor dem
+        Neu-Einlesen (sonst gilt das eigene Schreiben als „außerhalb geändert“)."""
+        for _ in range(50):
+            t = getattr(self, "_bg_thread", None)
+            if t is not None and t.is_alive():
+                t.join(20)
+                if t.is_alive():
+                    return
+            fin = getattr(self, "_bg_finish", None)
+            if fin is None or not getattr(self, "_bg_busy", False):
+                return
+            fin()
 
     def sync_file(self, n, kind, force=False, bg=False):
         """Nach dem Speichern: Inhalt in die Datei schreiben (neue Einträge bekommen dabei ihre Datei)."""
@@ -4327,15 +4504,23 @@ class Notes(Gtk.Application):
             if kind == "latex":
                 self.latex_files_along(n)              # schon eingefügte Bilder usw. mitnehmen
             else:
-                n["file"] = lk.new_path(self.prefs, kind, n.get("title"), n.get("folder"))
+                # belegt sind auch Pfade anderer Einträge, deren Datei noch geschrieben wird (Hintergrund)
+                n["file"] = lk.new_path(self.prefs, kind, n.get("title"), n.get("folder"), taken=self.taken_paths(n))
                 n["file_auto"] = True
         path = n.get("file")
         if not path:
             return
         # selbst angelegte Datei folgt dem Titel (LaTeX-Projektordner erst beim Verlassen – dort wird kompiliert)
         if n.get("file_auto") and os.path.exists(path) and (kind != "latex" or force):
-            new = lk.wanted_path(self.prefs, kind, n)
-            lk.move(n, new) if new else None
+            new = lk.wanted_path(self.prefs, kind, n, taken=self.taken_paths(n))
+            if new:
+                if bg and getattr(self, "_bg_busy", False):
+                    # Faden schreibt gerade (evtl. an den alten Pfad): nicht warten, danach umbenennen + schreiben
+                    self._bg_again = (kind, n)
+                    store.save(n, touch=False)
+                    return
+                self.join_bg()                     # sofort nötig: erst fertig schreiben lassen, dann umbenennen
+                lk.move(n, new)
         if kind == "latex" and n is self.current and self.tex:
             self.latex.set_project(os.path.dirname(n["file"]) if lk.is_project(n) else None,
                                    n.get("source") or n["file"])
@@ -4348,9 +4533,8 @@ class Notes(Gtk.Application):
         elif lk.needs_confirm(n):
             self.confirm_overwrite(n, kind)
         else:
-            mt = lk.mtime(path)
             # außerhalb geändert, während hier bearbeitet wurde: den fremden Stand vorher sichern
-            lk.backup_original(n, again=bool(mt and n.get("file_mtime") and abs(mt - n["file_mtime"]) > 0.001))
+            lk.backup_original(n, again=bool(n.get("file_mtime") and lk.differs(n, path)))
             try:
                 if bg:
                     self.write_bg(kind, n)
@@ -4394,7 +4578,7 @@ class Notes(Gtk.Application):
             if i == 1:
                 root, ext = os.path.splitext(n["file"])
                 n["file"] = lk.unique(f"{root} (notist){ext}")
-                n["file_mtime"] = None
+                lk.unstamp(n)
                 self.notify(f"Änderungen gehen jetzt nach {os.path.basename(n['file'])}")
             n["file_ok"] = True
             self.sync_file(n, kind)
@@ -4405,17 +4589,24 @@ class Notes(Gtk.Application):
         f = n.get("file")
         if not f:
             return False
-        mt = lk.mtime(f)
-        if mt is None:
+        if getattr(self, "_bg_busy", False) and lk.same(getattr(self, "_bg_path", None) or "", f):
+            return False                             # eigenes Schreiben läuft noch; dessen Ende merkt den neuen Stand
+        ch = lk.differs(n, f)
+        if ch is None:
             if not n.get("file_auto"):
                 n["file_missing"] = True
             return False
         n.pop("file_missing", None)
-        if n.get("file_mtime") is not None and abs(mt - n["file_mtime"]) <= 0.001:
+        if not ch:
             return False
         if n.get("file_mtime") is None and n.get("file_auto"):
-            n["file_mtime"] = mt                     # noch nie gelesen, selbst geschrieben: nichts zu tun
+            lk.stamp(n, f)                           # noch nie gelesen, selbst geschrieben: nichts zu tun
             return False
+        try:
+            if not is_empty(n):                      # bisheriger notist-Stand bleibt im Verlauf zurückholbar
+                self.stores[kind].snapshot(n, force=True)
+        except Exception:  # noqa: BLE001
+            log_error("Verlauf vor dem Neu-Einlesen")
         try:
             lk.load_into(kind, n, f)
         except Exception as e:  # noqa: BLE001
@@ -4437,7 +4628,8 @@ class Notes(Gtk.Application):
             store = self.stores[kind]
             n = store.create()
             n.update(data)
-            n["file"], n["file_auto"], n["file_mtime"] = p, True, lk.mtime(p)
+            n["file"], n["file_auto"] = p, True
+            lk.stamp(n, p)
             if folder:
                 n["folder"] = folder
             when = _dt.datetime.fromtimestamp(n["file_mtime"] or 0, _dt.timezone.utc).isoformat(timespec="seconds")
@@ -4525,7 +4717,7 @@ class Notes(Gtk.Application):
         if self.tex and self.current:
             d = os.path.join(lx.FILES, self.current["id"])
             os.makedirs(d, exist_ok=True)
-            Gio.AppInfo.launch_default_for_uri(Gio.File.new_for_path(d).get_uri(), None)
+            plat.open_external(d)
 
     def display_title(self, n, kind=None):
         if n["title"].strip():
@@ -4766,6 +4958,7 @@ class Notes(Gtk.Application):
             return
         if self.current is n:
             self.flush(force=True)
+        self.join_bg()                              # Hintergrund-Schreiben nicht an den alten Ort laufen lassen
         old = n.get("folder") or ""
         if folder:
             n["folder"] = folder
@@ -4778,7 +4971,7 @@ class Notes(Gtk.Application):
         else:
             n.pop("folder", None)
         if lk.move_to_folder(self.prefs, kind, n):   # selbst angelegte Datei zieht mit um
-            n["file_mtime"] = lk.mtime(n["file"])
+            lk.stamp(n)
             if kind == "latex" and n is self.current and self.tex:
                 self.latex.set_project(os.path.dirname(n["file"]) if lk.is_project(n) else None,
                                        n.get("source") or n["file"])
@@ -4913,6 +5106,7 @@ class Notes(Gtk.Application):
     def rename_folder(self, old, new, kind=None):
         kind = kind or self.kind
         self.flush(force=True)
+        self.join_bg()
         moved = lk.rename_dir(self.prefs, kind, old, new) if lk.settings(self.prefs)["new_as_files"] else None
         for n in self.stores[kind].notes.values():
             f = n.get("folder") or ""
@@ -4920,7 +5114,7 @@ class Notes(Gtk.Application):
                 n["folder"] = new + f[len(old):]
                 if moved and n.get("file") and lk.norm(n["file"]).startswith(lk.norm(moved[0]) + os.sep):
                     n["file"] = moved[1] + lk.norm(n["file"])[len(lk.norm(moved[0])):]
-                    n["file_mtime"] = lk.mtime(n["file"])
+                    lk.stamp(n)
                 self.stores[kind].save(n, touch=False)
         made, closed = self.folder_prefs(kind)
         ren = lambda f: new + f[len(old):] if (f == old or f.startswith(old + "/")) else f
@@ -4938,6 +5132,7 @@ class Notes(Gtk.Application):
         """Ordner auflösen: Einträge (auch aus Unterordnern) wandern eine Ebene höher, nichts wird gelöscht."""
         kind = kind or self.kind
         self.flush(force=True)
+        self.join_bg()
         parent = name.rpartition("/")[0]
         for n in list(self.stores[kind].notes.values()):
             f = n.get("folder") or ""
@@ -4949,7 +5144,7 @@ class Notes(Gtk.Application):
                 else:
                     n.pop("folder", None)
                 if lk.move_to_folder(self.prefs, kind, n):
-                    n["file_mtime"] = lk.mtime(n["file"])
+                    lk.stamp(n)
                 self.stores[kind].save(n, touch=False)
         made, closed = self.folder_prefs(kind)
         lift = lambda f: "/".join(x for x in (parent, f[len(name):].lstrip("/")) if x)
@@ -5861,6 +6056,8 @@ class Notes(Gtk.Application):
             except Exception:
                 log_error("Nach dem Speichern")
             trim_memory()
+        if wait:
+            self.join_bg()                                  # auch ein schon laufendes Schreiben abschließen
         return False
 
     def update_meta(self):
@@ -6000,7 +6197,7 @@ class Notes(Gtk.Application):
         if backup.due(self.prefs):          # fällige Sicherung noch schnell erledigen
             try:
                 b = backup.defaults(self.prefs)
-                backup.backup_now(os.path.expanduser(b["dir"]), b["keep"])
+                backup.backup_now(os.path.expanduser(b["dir"]), b["keep"], files_dir=backup.files_dir_of(self.prefs))
                 import datetime as _dt
                 b["last"] = _dt.datetime.now().isoformat(timespec="seconds")
             except Exception:  # noqa: BLE001
@@ -6058,8 +6255,8 @@ def check():
     comps = lx.find_compilers()
     print(f"  {t('LaTeX-Compiler')} ".ljust(36, ".") + f" {ok(bool(comps))}" +
           (f" ({comps[0][0]})" if comps else " – " + t("lässt sich in der App mit einem Klick einrichten")))
-    has_notify = bool(shutil.which("notify-send"))
-    print(f"  {t('Erinnerungen (notify-send)')} ".ljust(36, ".") + f" {ok(has_notify)}" +
+    has_notify = bool(shutil.which(plat.notify_cmd("", "")[0]))
+    print(f"  {t('Erinnerungen (' + plat.notify_cmd('', '')[0] + ')')} ".ljust(36, ".") + f" {ok(has_notify)}" +
           ("" if has_notify else " – " + t("Paket libnotify-bin (Debian/Ubuntu) bzw. libnotify")))
     print(f"  {t('Symbolschrift (mitgeliefert)')} ".ljust(36, ".") + f" {ok(os.path.exists(ICON_FONT))}")
     print(f"  {t('Fenster')} ".ljust(36, ".") + " " + t("ohne Titelleiste (Kachel-Manager)" if tiling_desktop() else "mit Titelleiste"))
@@ -6067,9 +6264,17 @@ def check():
 
 
 if __name__ == "__main__":
+    sys.argv = [a for a in sys.argv if not a.startswith("-psn_")]      # Finder (ältere macOS) hängt eine Prozessnummer an
+    for _s in (sys.stdout, sys.stderr):      # C-/POSIX-Locale (Start der Mac-.app ohne LANG): sonst bricht print() an Umlauten ab
+        try:
+            _s.reconfigure(encoding="utf-8", errors="replace")
+        except (AttributeError, ValueError):
+            pass
     if "--check" in sys.argv:
         sys.exit(check())
-    if "--remind" in sys.argv:               # vom systemd-Timer gestartet
+    if plat.SYSTEM != "linux" and "--version" not in sys.argv and plat.forward_to_running(sys.argv[1:]):
+        sys.exit(0)                          # Mac/Windows: läuft notist schon, bekommt diese Instanz die Aufgabe
+    if "--remind" in sys.argv:               # vom Timer (systemd/launchd/schtasks) gestartet
         nid = sys.argv[sys.argv.index("--remind") + 1]
         app = Notes()
         app.register(None)
@@ -6078,11 +6283,10 @@ if __name__ == "__main__":
             sys.exit(0)
         n = rem.mark_done(nid)
         if n:
-            import shutil, subprocess
             title = n.get("title") or " ".join(n.get("text", "").split())[:40] or "Erinnerung"
             body = " ".join(n.get("text", "").replace("\ufffc", "").split())[:140]
-            if shutil.which("notify-send"):
-                subprocess.run(["notify-send", "-a", "notist", "-i", "notist", f"󰂚 {title}", body])
+            if plat.notify(f"󰂚 {title}", body, nid):
+                pass
             else:
                 note = Gio.Notification.new(f"󰂚 {title}")
                 note.set_body(body)

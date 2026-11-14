@@ -1,0 +1,64 @@
+# macOS-Prüflauf für notist (Apple Silicon). Wird von publish.sh nach .github/workflows/mac.yml kopiert.
+# Läuft nur von Hand (Actions → mac → Run workflow) oder bei Änderungen am Mac-Installer – privates Repo: macOS-Minuten zählen 10-fach.
+name: mac
+on:
+  workflow_dispatch:
+  push:
+    paths: ["install-mac.sh", "mac/**", ".github/workflows/mac.yml"]
+jobs:
+  mac:
+    runs-on: macos-14
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/cache@v4
+        with:
+          path: ~/Library/Caches/Homebrew
+          key: brew-${{ runner.os }}-${{ hashFiles('install-mac.sh') }}
+      - name: Installieren
+        run: |
+          mkdir -p out
+          ./install-mac.sh --yes 2>&1 | tee out/install.log
+      - name: notist --check
+        run: |
+          ~/Applications/notist.app/Contents/MacOS/notist --check --plain 2>&1 | tee out/check.log
+          ! grep -q "Oberfläche.*fehlt\|Gtk-4.0.*fehlt" out/check.log
+      - name: Tests ohne Oberfläche (Rundlauf, Abgleich, Plattform)
+        run: |
+          PY="$(brew --prefix)/bin/python3"
+          cd "$HOME/Library/Application Support/notist/app"
+          "$PY" -X utf8 tests/roundtrip.py 2>&1 | tee "$GITHUB_WORKSPACE/out/roundtrip.log"
+          "$PY" -X utf8 tests/sync_sim.py --runs 2000 2>&1 | tee "$GITHUB_WORKSPACE/out/sync_sim.log"
+          "$PY" -X utf8 tests/plat_test.py 2>&1 | tee "$GITHUB_WORKSPACE/out/plat_test.log"
+          "$PY" -X utf8 tests/mac_sys_test.py 2>&1 | tee "$GITHUB_WORKSPACE/out/mac_sys_test.log"
+      - name: LaTeX, PDF-Suche, SyncTeX, Tabellen, Wörterbuch (Schritt 16)
+        run: |
+          brew install tectonic || true
+          PY="$(brew --prefix)/bin/python3"
+          cd "$HOME/Library/Application Support/notist/app"
+          export DYLD_FALLBACK_LIBRARY_PATH="$(brew --prefix)/lib" XDG_DATA_DIRS="$(brew --prefix)/share"
+          "$PY" -X utf8 tests/tex_test.py 2>&1 | tee "$GITHUB_WORKSPACE/out/tex_test.log"
+      - name: Rauchtest (Schritt 13 – darf noch scheitern)
+        continue-on-error: true
+        run: |
+          PY="$(brew --prefix)/bin/python3"
+          cd "$HOME/Library/Application Support/notist/app"
+          export DYLD_FALLBACK_LIBRARY_PATH="$(brew --prefix)/lib" XDG_DATA_DIRS="$(brew --prefix)/share"
+          "$PY" -X utf8 tests/smoke.py 2>&1 | tee "$GITHUB_WORKSPACE/out/smoke.log"
+          "$PY" -X utf8 tests/keys_test.py 2>&1 | tee "$GITHUB_WORKSPACE/out/keys_test.log"
+          "$PY" -X utf8 tests/look_test.py 2>&1 | tee "$GITHUB_WORKSPACE/out/look_test.log"
+      - name: App 20 s starten + Bildschirmfoto
+        continue-on-error: true
+        run: |
+          export NOTES_HOME="$RUNNER_TEMP/notist-home" NOTES_NO_TIMERS=1 NOTES_TIMING=1
+          ~/Applications/notist.app/Contents/MacOS/notist > out/app.log 2>&1 &
+          sleep 20
+          screencapture -x out/screen.png || true
+          ~/Applications/notist.app/Contents/MacOS/notist --quit || true
+          sleep 2
+          ! grep -q "Traceback\|CRITICAL" out/app.log
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: notist-mac-logs
+          path: out/

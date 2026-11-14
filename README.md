@@ -7,7 +7,7 @@
 
 **notes, words and latex in one gtk4 app**
 
-<img src="https://img.shields.io/badge/GTK-4-4A86CF?style=flat-square&logo=gtk&logoColor=white" alt="GTK"> <img src="https://img.shields.io/badge/python-3.10+-3776AB?style=flat-square&logo=python&logoColor=white" alt="python"> <img src="https://img.shields.io/badge/platform-linux%20·%20windows-2E7D6B?style=flat-square&logo=linux&logoColor=white" alt="platform"> <img src="https://img.shields.io/badge/made%20for-wayland%20·%20hyprland-7C6BC4?style=flat-square" alt="made for">
+<img src="https://img.shields.io/badge/GTK-4-4A86CF?style=flat-square&logo=gtk&logoColor=white" alt="GTK"> <img src="https://img.shields.io/badge/python-3.10+-3776AB?style=flat-square&logo=python&logoColor=white" alt="python"> <img src="https://img.shields.io/badge/platform-linux%20·%20windows%20·%20macos-2E7D6B?style=flat-square&logo=linux&logoColor=white" alt="platform"> <img src="https://img.shields.io/badge/made%20for-wayland%20·%20hyprland-7C6BC4?style=flat-square" alt="made for">
 
 </div>
 
@@ -46,6 +46,23 @@ installs the packages and adds notist to the start menu. your data lives in
 `%USERPROFILE%\.local\share\notes\data`. removal: `uninstall-windows.bat` (data stays).
 on windows there are no reminders while the app is closed and no background mode (✕ exits notist).
 
+## install – macos (apple silicon, experimental)
+
+needs [homebrew](https://brew.sh). in a terminal inside the repo folder: `./install-mac.sh`.
+it installs gtk 4, pygobject, poppler, hunspell and terminal-notifier via homebrew, downloads the de/en spelling dictionaries
+from libreoffice (de_DE_frami: gpl-2.0/gpl-3.0, en_US: bsd/mit-style) and builds `~/Applications/notist.app`
+(also `notist` in the terminal). data: `~/Library/Application Support/notist`, documents: `~/Documents/notist`.
+update `./install-mac.sh --update`, remove `./install-mac.sh uninstall` (data stays unless you say yes).
+a github-actions check (`.github/workflows/mac.yml`) installs and tests it on a macos runner.
+
+on the mac: ⌘ instead of ctrl (⌘N, ⌘F, ⌘1–3 for notes/words/latex, ⌘Q quits for real, ⌘W closes the tab), a native menu bar,
+light/dark follows the system, reminders via launchd (+ clickable notifications with terminal-notifier), optional
+start at login (settings → general), latex via tectonic (set up in the app), homebrew tectonic or mactex.
+
+what is missing on the mac on purpose: the neighbour apps of the suite (filist, datist, linguist, scourge, mailist …) – their
+buttons stay hidden; the glass effect (needs hyprland); xls/ods import (only xlsx and csv; ssconvert is a gnumeric tool);
+no signed `.dmg` (needs an apple developer account).
+
 ## runs on
 
 | system | status |
@@ -55,6 +72,7 @@ on windows there are no reminders while the app is closed and no background mode
 | arch, endeavouros, cachyos, manjaro | tested (arch) |
 | openSUSE Tumbleweed | should work (untested) |
 | windows 10/11 | via msys2 – app start tested, installer on real windows still untested |
+| macos 13+ (apple silicon) | experimental – installer and app only tested on linux with stubs; github actions run pending |
 
 the animated text cursor draws smoothly with gtk 4.14 or newer; older versions use a slower fallback.
 

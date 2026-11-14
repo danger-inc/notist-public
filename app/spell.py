@@ -10,6 +10,7 @@ gi.require_version("Graphene", "1.0")
 from gi.repository import Gdk, Gio, GLib, Graphene, Gtk, Pango
 
 import paths
+from core import plat
 
 PWL = paths.WORDS
 INSTALL_HINT = "sudo pacman -S hunspell hunspell-de hunspell-en_us"
@@ -25,15 +26,7 @@ _langs = list(DEFAULT_LANGS)
 
 
 def dict_dirs():
-    dirs = [d for d in os.environ.get("DICPATH", "").split(os.pathsep) if d]
-    dirs += [os.path.expanduser("~/.local/share/hunspell"), "/usr/share/hunspell", "/usr/share/myspell",
-             "/usr/share/myspell/dicts", "/usr/local/share/hunspell", "/app/share/hunspell",
-             os.path.join(sys.prefix, "share", "hunspell"), "/ucrt64/share/hunspell", "/mingw64/share/hunspell"]
-    out = []
-    for d in dirs:
-        if d not in out and os.path.isdir(d):
-            out.append(d)
-    return out
+    return plat.dict_dirs()
 
 
 def find_dict(name):
@@ -52,14 +45,9 @@ class _Hunspell:
     def load(cls):
         if cls.lib is None:
             cls.lib = False
-            for name in ("libhunspell-1.7.so.0", "libhunspell-1.7.so", "libhunspell.so", "libhunspell-1.6.so.0",
-                         "libhunspell-1.7-0.dll", "libhunspell-1.7.0.dylib", "libhunspell.dylib"):
-                try:
-                    L = ctypes.CDLL(name)
-                    break
-                except OSError:
-                    continue
-            else:
+            L = plat.load_lib(("libhunspell-1.7.so.0", "libhunspell-1.7.so", "libhunspell.so", "libhunspell-1.6.so.0",
+                               "libhunspell-1.7-0.dll", "libhunspell-1.7.0.dylib", "libhunspell.dylib"))
+            if L is None:
                 return False
             vp, cp, pp = ctypes.c_void_p, ctypes.c_char_p, ctypes.POINTER(ctypes.POINTER(ctypes.c_char_p))
             L.Hunspell_create.restype = vp
@@ -118,9 +106,8 @@ class _Enchant:
     @classmethod
     def load(cls):
         if cls.lib is None:
-            try:
-                L = ctypes.CDLL("libenchant-2.so.2")
-            except OSError:
+            L = plat.load_lib(("libenchant-2.so.2", "libenchant-2.2.dylib", "libenchant-2.dylib", "libenchant-2-2.dll"))
+            if L is None:
                 cls.lib = False
                 return False
             vp, cp = ctypes.c_void_p, ctypes.c_char_p
@@ -192,7 +179,7 @@ class Speller:
         try:
             os.makedirs(os.path.dirname(PWL), exist_ok=True)
             if not os.path.exists(PWL):
-                open(PWL, "a").close()
+                open(PWL, "a", encoding="utf-8").close()
             with open(PWL, encoding="utf-8") as f:
                 self.own = {w.strip() for w in f if w.strip() and not w.startswith("#")}
         except OSError:

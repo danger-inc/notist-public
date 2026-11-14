@@ -25,6 +25,7 @@ from writer import WrapLayout, file_menu, popover_button, rgba, tool
 F = ld.F
 import i18n  # noqa: E402
 import paths
+from core import plat
 FILES = paths.LATEX_FILES      # Projektordner je Dokument (Bilder usw.)
 TOOLS = paths.TOOLS
 BUILD = os.path.join(GLib.get_user_cache_dir(), "notes", "latex")
@@ -45,7 +46,7 @@ PACKAGES = [
 
 CSS = """
 .latex-editor textview.tex, .latex-editor textview.tex text { background: none; color: @foreground; }
-textview.tex { font-family: "JetBrainsMono Nerd Font", "JetBrains Mono", "DejaVu Sans Mono", monospace;
+textview.tex { font-family: "JetBrainsMono Nerd Font", "JetBrains Mono", "DejaVu Sans Mono", "SF Mono", Menlo, Consolas, monospace;
     font-size: 10.5pt; caret-color: @color9; }
 .tex-pane { background-color: alpha(@background, 0.55); border-radius: 11px; }
 .glass .tex-pane { background-color: alpha(@background, 0.25); }
@@ -115,10 +116,11 @@ popover.complete row:selected { background-color: alpha(@color9, 0.25); color: @
 # =====================================================================
 # Compiler
 # =====================================================================
-TECTONIC_EXE = "tectonic.exe" if os.name == "nt" else "tectonic"
+TECTONIC_EXE = plat.tectonic_exe()
 
 
 def which_tectonic():
+    plat.fix_path()
     own = os.path.join(TOOLS, TECTONIC_EXE)
     return own if os.access(own, os.X_OK) else shutil.which("tectonic")
 
@@ -133,6 +135,7 @@ COMPILERS = [  # (Name, Finder) – Reihenfolge = Vorzug
 
 
 def find_compilers():
+    plat.fix_path()                     # Mac: Homebrew/MacTeX liegen nicht im PATH eines Dock-Starts
     return [(name, path) for name, find in COMPILERS if (path := find())]
 
 
@@ -157,13 +160,7 @@ def install_tectonic(progress, done):
     """Lädt die neueste Tectonic-Version von GitHub (Hintergrund-Thread). progress(text, anteil), done(fehler)."""
     def run():
         try:
-            if os.name == "nt":
-                arch = {"AMD64": "x86_64-pc-windows-msvc", "x86_64": "x86_64-pc-windows-msvc"}.get(platform.machine())
-                ext = ".zip"
-            else:
-                arch = {"x86_64": "x86_64-unknown-linux-musl", "aarch64": "aarch64-unknown-linux-musl",
-                        "armv7l": "arm-unknown-linux-musleabihf"}.get(platform.machine())
-                ext = ".tar.gz"
+            arch, ext = plat.tectonic_asset()
             if not arch:
                 raise RuntimeError(f"Prozessor {platform.machine()} wird nicht unterstützt")
             GLib.idle_add(progress, "Suche neueste Version …", 0.02)
@@ -493,7 +490,7 @@ class PdfPreview(Gtk.Box):
 
     def on_click(self, gesture, n, x, y):
         """Doppelklick oder Strg+Klick ins PDF: zur Stelle im Quelltext (SyncTeX)."""
-        ctrl = gesture.get_current_event_state() & Gdk.ModifierType.CONTROL_MASK
+        ctrl = gesture.get_current_event_state() & plat.primary_mask()
         if not (n == 2 or ctrl) or not self.on_inverse:
             return
         for i, p in enumerate(self.pages):
@@ -549,7 +546,7 @@ class PdfPreview(Gtk.Box):
 
     def open_external(self):
         if self.path and os.path.exists(self.path):
-            Gio.AppInfo.launch_default_for_uri(Gio.File.new_for_path(self.path).get_uri(), None)
+            plat.open_external(self.path)
 
 
 # =====================================================================
@@ -930,8 +927,7 @@ class LatexEditor(Gtk.Box):
                         label="Oder über die Paketverwaltung (danach notist neu starten):")
         alt.add_css_class("tex-status")
         box.append(alt)
-        for cmd in ("sudo pacman -S tectonic            # Arch", "sudo apt install texlive-latex-extra latexmk   # Debian/Ubuntu",
-                    "sudo dnf install texlive-scheme-medium latexmk   # Fedora"):
+        for cmd in plat.latex_install_hints():
             l = Gtk.Label(label=cmd, xalign=0, selectable=True, wrap=True, wrap_mode=Pango.WrapMode.WORD_CHAR)
             l.add_css_class("setup-code")
             box.append(l)
@@ -1378,13 +1374,7 @@ class LatexEditor(Gtk.Box):
 
     @staticmethod
     def _show_in_files(path):
-        uri = Gio.File.new_for_path(path).get_uri()
-        try:
-            Gio.bus_get_sync(Gio.BusType.SESSION, None).call_sync(
-                "org.freedesktop.FileManager1", "/org/freedesktop/FileManager1", "org.freedesktop.FileManager1",
-                "ShowItems", GLib.Variant("(ass)", ([uri], "")), None, Gio.DBusCallFlags.NONE, 3000, None)
-        except Exception:  # noqa: BLE001
-            Gio.AppInfo.launch_default_for_uri(Gio.File.new_for_path(os.path.dirname(path)).get_uri(), None)
+        plat.reveal(path)
 
     def delete_file(self, name=None):
         """Projektdatei löschen – nach Rückfrage, und nur in den Papierkorb (lässt sich zurückholen)."""
@@ -1407,9 +1397,7 @@ class LatexEditor(Gtk.Box):
 
     def _delete_file(self, name):
         path = os.path.join(self.project_dir(), name)
-        try:
-            Gio.File.new_for_path(path).trash(None)
-        except Exception:  # noqa: BLE001 – kein Papierkorb auf diesem Dateisystem
+        if not plat.trash(path):          # kein Papierkorb auf diesem Dateisystem
             try:
                 os.remove(path)
             except OSError:
@@ -1571,7 +1559,7 @@ class LatexEditor(Gtk.Box):
 
     # ================= Tastatur =================
     def on_key(self, ctrl, keyval, code, state):
-        ctrl_on = state & Gdk.ModifierType.CONTROL_MASK
+        ctrl_on = state & plat.primary_mask()
         shift = state & Gdk.ModifierType.SHIFT_MASK
         popup = self.cpop.get_visible()
         if keyval == Gdk.KEY_F1 and not ctrl_on:

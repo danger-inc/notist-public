@@ -94,7 +94,7 @@ def _vkey(v):
 # ---------- „Neu seit dem letzten Mal“ ----------
 def _load_seen():
     try:
-        with open(SEEN_FILE) as f:
+        with open(SEEN_FILE, encoding="utf-8") as f:
             return json.load(f)
     except (OSError, ValueError):
         return {}
@@ -104,7 +104,7 @@ def _save_seen(data):
     try:
         os.makedirs(os.path.dirname(SEEN_FILE), exist_ok=True)
         tmp = SEEN_FILE + ".tmp"
-        with open(tmp, "w") as f:
+        with open(tmp, "w", encoding="utf-8") as f:
             json.dump(data, f, indent=1)
         os.replace(tmp, SEEN_FILE)
     except OSError:
@@ -148,7 +148,9 @@ REPOS = {
 }
 UPDATE_FILE = os.path.expanduser("~/.cache/ist-updates.json")
 UPDATE_EVERY = 6 * 3600
-UPDATE_HINT = "./update.sh im repo-ordner"
+# Paketverwaltung statt eigenem Installer (z. B. IST_PACKAGED=nix aus dem Nix-Paket): kein Update-Knopf-Installer
+PACKAGED = os.environ.get("IST_PACKAGED", "")
+UPDATE_HINT = {"nix": "nix flake update + rebuild"}.get(PACKAGED, "./update.sh im repo-ordner")
 _updates = {}          # app → neuere Version (für das Changelog-Fenster)
 
 
@@ -187,7 +189,7 @@ def _token():
     if not gh:
         return None
     try:
-        r = subprocess.run([gh, "auth", "token"], capture_output=True, text=True, timeout=5)
+        r = subprocess.run([gh, "auth", "token"], capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=5)
         return r.stdout.strip() or None
     except Exception:
         return None
@@ -224,7 +226,7 @@ def latest_version(key):
 
 def _load_updates():
     try:
-        with open(UPDATE_FILE) as f:
+        with open(UPDATE_FILE, encoding="utf-8") as f:
             return json.load(f)
     except (OSError, ValueError):
         return {}
@@ -261,7 +263,7 @@ def check_update(key, version, callback, force=False, none=None):
             try:
                 os.makedirs(os.path.dirname(UPDATE_FILE), exist_ok=True)
                 tmp = f"{UPDATE_FILE}.{os.getpid()}"
-                with open(tmp, "w") as f:
+                with open(tmp, "w", encoding="utf-8") as f:
                     json.dump(data, f, indent=1)
                 os.replace(tmp, UPDATE_FILE)
             except OSError:
@@ -271,6 +273,8 @@ def check_update(key, version, callback, force=False, none=None):
 
 
 def update_text(latest):
+    if PACKAGED:
+        return f"v{latest} ist da – {UPDATE_HINT}"
     return f"v{latest} ist da – oben neben der Version auf „update“ klicken"
 
 
@@ -283,6 +287,8 @@ def _installer():
     Modul nehmen, sonst die nächste Kopie (App-Ordner, rice-apps, scourge)."""
     global _installer_mod
     import sys
+    if PACKAGED:            # Paketverwaltung zuständig → Knopf öffnet nur die Repo-Seite
+        return None
     if "suite_install" in sys.modules:
         return sys.modules["suite_install"]
     if _installer_mod is None:
@@ -594,7 +600,7 @@ def _install_css(colors_css=None):
             colors_css = istheme.resolve()[0]
         except Exception:
             try:
-                colors_css = open(MATUGEN_CSS).read()
+                colors_css = open(MATUGEN_CSS, encoding="utf-8").read()
             except OSError:
                 colors_css = ""
     # Alle Farbnamen bekommen das Präfix cl_: @define-color gilt in GTK für das ganze Programm, und dieser

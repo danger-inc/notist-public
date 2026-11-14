@@ -9,6 +9,13 @@ HERE = os.path.dirname(os.path.realpath(__file__))
 KEYS = (("Strg+", "Ctrl+"), ("Umschalt+", "Shift+"), ("+Leertaste", "+Space"), ("+Entf", "+Del"),
         ("Strg ", "Ctrl "), ("Umschalt ", "Shift "))
 LANG = "de"
+try:
+    from core import plat as _plat
+    MAC = _plat.SYSTEM == "mac"
+except Exception:  # noqa: BLE001
+    MAC = False
+_MODS = re.compile(r"\b((?:Strg|Ctrl|Umschalt|Shift|Alt)\+)+(?=[^\s+])")
+_ALT123 = re.compile(r"\bAlt\+(?=[0-3]\b)")
 TABLE = {}
 _collect = None
 _seen = set()
@@ -18,6 +25,19 @@ PH = re.compile(r"„[^“]*“|\"[^\"]*\"|[\w.-]+\.(?:tex|pdf|docx|doc|odt|txt|
                 r"|\d+(?:[.,:]\d+)*")
 GERMAN = re.compile(r"[äöüÄÖÜß]|\b(der|die|das|und|oder|mit|nicht|für|ein|eine|ist|wird|zu|von|im|auf|neu|Seite|"
                     r"Notiz|Dokument|Datei|Bild|Text|Fehler|keine?|alle|Zeile|Wörter|Zeichen)\b", re.I)
+
+
+def macify(s):
+    """Mac-Schreibweise der Kürzel: „Strg+Umschalt+F“ → „⇧⌘F“, „Alt+1“ → „⌘1“ (Reihenfolge wie im Menü: ⌃⌥⇧⌘)."""
+    if "+" not in s:
+        return s
+    s = _ALT123.sub("Strg+", s)
+
+    def one(m):
+        mods = re.findall(r"Strg|Ctrl|Umschalt|Shift|Alt", m.group())
+        return ("⌥" if "Alt" in mods else "") + ("⇧" if {"Umschalt", "Shift"} & set(mods) else "") + \
+            ("⌘" if {"Strg", "Ctrl"} & set(mods) else "")
+    return _MODS.sub(one, s)
 
 
 def setup(lang):
@@ -30,7 +50,7 @@ def setup(lang):
                 TABLE = json.load(f)
         except (OSError, ValueError):
             TABLE = {}
-    if LANG != "de" or _collect:
+    if LANG != "de" or _collect or MAC:
         install()
 
 
@@ -59,11 +79,14 @@ def tr(s, *args):
     if not isinstance(s, str) or not s:
         return s.format(*args) if args and isinstance(s, str) else s
     if LANG == "de" and not _collect:
-        return s.format(*args) if args else s
+        out = macify(s) if MAC else s
+        return out.format(*args) if args else out
     out = _tr(s)
     if LANG == "en":
         for a, b in KEYS:
             out = out.replace(a, b)
+    if MAC:
+        out = macify(out)
     return out.format(*args) if args else out
 
 

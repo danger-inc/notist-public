@@ -2,6 +2,7 @@
 import os
 import threading
 
+from core import plat
 import gi
 gi.require_version("Gtk", "4.0")
 from gi.repository import Gdk, Gio, GLib, Gtk, Pango
@@ -240,4 +241,4 @@ class PackageManager(Gtk.Window):
     def open_folder(self):
         d = pc.cache_dir()
         os.makedirs(d, exist_ok=True)
-        Gio.AppInfo.launch_default_for_uri(Gio.File.new_for_path(d).get_uri(), None)
+        plat.open_external(d)

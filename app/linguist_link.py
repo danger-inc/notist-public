@@ -15,7 +15,7 @@ STATE_FILE = os.path.join(CFG_DIR, "state.json")     # Apps und linguist: {"hove
 
 def _load(path):
     try:
-        with open(path) as f:
+        with open(path, encoding="utf-8") as f:
             data = json.load(f)
         return data if isinstance(data, dict) else {}
     except (OSError, ValueError):
@@ -54,7 +54,7 @@ def set_hover_active(on):
     try:
         os.makedirs(CFG_DIR, exist_ok=True)
         tmp = STATE_FILE + ".tmp"
-        with open(tmp, "w") as f:
+        with open(tmp, "w", encoding="utf-8") as f:
             json.dump(state, f)
         os.replace(tmp, STATE_FILE)
     except OSError:

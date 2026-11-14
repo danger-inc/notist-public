@@ -32,6 +32,7 @@ BLOCKS = (
     ("image", "󰋩", "bild …", "bild image foto"),
     ("toc", "󰠶", "inhaltsverzeichnis", "inhalt toc verzeichnis"),
     ("pdf", "󰈦", "pdf", "pdf anhang datei dokument"),
+    ("sheet", "\U000f021b", "sheet", "sheet tabelle excel xlsx calc gnumeric kalkulation"),
     ("link", "\U000F0337", "link", "link url adresse hyperlink verweis"),
     ("date", "󰃭", "datum von heute", "datum date heute"),
     ("footnote", "󰯃", "fußnote", "fußnote footnote"),
@@ -341,6 +342,8 @@ class FlowMode:
             w.insert_block("toc")
         elif key == "pdf":
             w.pick_pdf()
+        elif key == "sheet":
+            w.pick_sheet()
         elif key == "link":
             w.open_link(clip=True)
             return

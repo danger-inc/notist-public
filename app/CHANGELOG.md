@@ -1,5 +1,61 @@
 # notist – Änderungen
 
+## 5.1.0 (2026-11-14)
+- **Neue Handy-App 1.0 (Android)**: Notizen, Words und LaTeX auf dem Handy mit demselben Kern wie am PC – Formatierung, Tabellen, Bilder, Fußnoten, Kommentare, Änderungen verfolgen, PDF-/Tabellen-Blöcke, Rechtschreibung, Übersetzer, Verlauf, Erinnerungen, Sicherung, Export in alle Formate, 9 Designs und Englisch. Gekoppelt wird wie zwischen Rechnern: Einstellungen → Geräte → „Koppeln“, Code in der App eintippen.
+- **LaTeX am Handy**: Das Handy lässt am gekoppelten Rechner bauen und zeigt PDF, Fehlerliste und die Sprünge Quelle ↔ PDF (SyncTeX). Dafür versteht der Abgleich jetzt die Anfragen „kompilieren“, „Zeile → PDF“ und „PDF → Zeile“.
+- **Altes Verfahren für die Handy-App 0.1.0 entfernt**: Die alte Handy-App muss neu gekoppelt werden (ihre Daten bleiben beim Update erhalten).
+- **Intern**: GTK-freie Handy-Module im Kern (mobile.py, spellmob.py, backupcore.py), Abgleich-Erweiterungen für zusätzliche Anfragen.
+
+## 5.0.0 (2026-11-14)
+- **notist für macOS (neu, experimentell)**: `./install-mac.sh` richtet notist auf einem Apple-Silicon-Mac ein (Homebrew-GTK, eigenes `notist.app` in ~/Applications, Wörterbücher de/en). Auf dem Mac gilt ⌘ statt Strg (⌘1–3 wechseln Notizen/Words/LaTeX, ⌘Q beendet, ⌘W schließt den Reiter), es gibt eine Menüleiste, Hell/Dunkel folgt dem System, Erinnerungen laufen über launchd (Klick auf die Meldung öffnet den Eintrag, mit terminal-notifier), auf Wunsch Start bei der Anmeldung, der Papierkorb ist der Finder-Papierkorb, LaTeX geht mit Tectonic, MacTeX oder Homebrew. CSV-Tabellen lassen sich ohne Gnumeric öffnen. Auf dem Mac fehlen bewusst die Nachbar-Apps (deren Knöpfe bleiben unsichtbar) und der Glas-Effekt. Getestet wurde bisher nur unter Linux (Plattform vorgetäuscht); ein echter Lauf auf dem Mac steht noch aus.
+- **Gemeinsamer Kern**: Speicher, Formate, Teilen, Abgleich und LaTeX-Daten liegen jetzt in einem GTK-freien Kern (core/), der auf PC, Mac und später im Handy läuft. Die Plattform-Unterschiede stehen an einer Stelle (core/plat.py).
+- **Abgleich zwischen Rechnern** (aus 4.31): PC↔PC/Mac, mit Quittung, Anhängen und Zähler statt Uhrzeit. Die Handy-App 0.1.0 gleicht weiter nach dem alten Verfahren ab.
+- **Kleinigkeiten**: Zoom in Words ruhiger (4.30), UTF-8 überall, Rundlauf-Test über 526 Dokumentmodelle ohne Abweichung.
+
+## 4.31.0 (2026-11-14)
+- **Abgleich zwischen Rechnern (neu)**: Mehrere notist-Rechner lassen sich koppeln – Einstellungen → Geräte → „Mit einem anderen Rechner koppeln“ (Adresse und Code eintippen; am anderen Rechner „Gerät hierher koppeln“ drücken). Die Suche im Netz findet Rechner auch selbst. Notizen und Words-Dokumente werden dann automatisch abgeglichen, standardmäßig alle 10 Minuten und beim Wechsel in notist. Intervall, Entkoppeln und Abgleich von Hand gibt es auf der gleichen Seite.
+- **Anhänge und LaTeX mit abgleichen**: PDF- und Tabellen-Anhänge sowie LaTeX-Projektdateien kommen beim Abgleich mit. Große Dateien werden in Teilen übertragen und nach einem Abbruch dort fortgesetzt, wo sie aufgehört haben.
+- **Nichts geht bei Verbindungsabbruch verloren**: Ein Eintrag gilt erst als abgeglichen, wenn die Gegenstelle den Empfang bestätigt hat. Löschungen werden genauso gesichert.
+- **Konflikte ohne Uhrzeit**: Welche Fassung neuer ist, entscheidet ein Zähler je Eintrag statt der Uhrzeit des Rechners. Eine falsch gestellte Uhr bringt also keine alten Stände mehr nach vorn. Bei echtem Konflikt bleibt die andere Fassung als Kopie „(konflikt)“ erhalten.
+- **Handy**: Die Handy-App 0.1.0 gleicht weiter nach dem bisherigen Verfahren ab; der neue Abgleich zwischen Rechnern ersetzt das nicht. Die neue Handy-App folgt.
+- **Ruhiger Start**: Das Vergleichen der Einträge wird zwischengespeichert, deshalb ist ein erneuter Abgleich deutlich schneller.
+
+## 4.30.0 (2026-11-14)
+- **Zoom in Words und PDF ruhiger**: Strg+Mausrad und Touchpad-Gesten zoomen gleichmäßig, ohne hin und her zu springen. Die Stelle unter dem Zeiger bzw. zwischen den Fingern bleibt stehen, auch bei Knöpfen, Regler und Strg+±. Beim Zoomen gleitet die Seite weich mit; die scharfe Darstellung kommt nach einem kurzen Moment der Ruhe.
+- **Datensicherheit**: Änderungen, die während des Speicherns im Hintergrund noch liefen, gehen nicht mehr verloren. Wiederherstellen einer Sicherung, Umbenennen und Verschieben während des Speicherns sind abgesichert. Erinnerungen melden sich nicht mehr für gelöschte Einträge.
+- **Dateien und Sicherungen**: Zwei neue Einträge mit gleichem Titel bekommen unterschiedliche Dateien. Anhänge (PDF, Tabellen) werden beim Teilen nicht mehr überschrieben. Sicherungen enthalten jetzt auch den Dateiordner; ein Wiederherstellen holt fehlende Dateien zurück.
+- **Kaputte Dateien**: Eine beschädigte Notiz wird nicht mehr stillschweigend übersprungen, sondern in den Ordner „kaputt“ verschoben, mit Hinweis.
+- **Umlaute und Sonderzeichen**: Alle Dateien werden einheitlich als UTF-8 gelesen und geschrieben. Das betrifft vor allem Systeme mit anderer Spracheinstellung.
+- **Export und Import**: Zeilenabstand bleibt beim Speichern als ODT stabil (kein Anwachsen mehr). Zitate, Seitenumbrüche vor Tabellen und Listen bleiben erhalten. HTML-Dateien mit Doctype, Tabellen, Links und Bildern werden vollständig gelesen. Markdown: Leerzeilen erzeugen keine doppelten Absätze mehr; verschachtelte Auszeichnung wie ***fett kursiv*** wird richtig erkannt.
+- **Fix**: Export nach Markdown, HTML, Text, RTF und EPUB stürzte bei eingebetteten PDFs ab. Das ist behoben.
+- **Fehlermeldungen**: Fehler bei Sicherung und Übersetzung wurden nicht angezeigt; jetzt erscheinen sie.
+- **Englische Oberfläche**: Einige Texte (Energiesparmodus, Wechsel-Animation, Handy-Kopplung, Update-Suche) sind jetzt übersetzt.
+
+## 4.29.0 (2026-11-09)
+- **/sheet – Tabellen einfügen**: Im Words-Dokument (auch „fließend“) fügt `/sheet` eine Tabelle (XLSX; XLS/ODS/CSV werden mit Gnumerics ssconvert umgewandelt) als Karte ein – wie bei `/pdf`. Die Datei liegt im notist-Ordner (data/sheets), gleiche Dateien nur einmal.
+- Die Karte zeigt Blattanzahl, Größe und auf Knopfdruck eine **Vorschau** (Blätter umschaltbar, Zahlen rechtsbündig, Datumswerte als Datum, Formeln mit ihrem berechneten Wert). Weitere Knöpfe: in **Gnumeric öffnen**, das Blatt als **echte Words-Tabelle einfügen**, Kopie speichern, umbenennen, entfernen.
+- Export (DOCX, PDF, HTML, Markdown, ODT, RTF, EPUB, LaTeX) und Teilen als .notes-Datei nehmen die Tabelle mit; Sicherungen holen fehlende PDF-/Tabellen-Anhänge zurück.
+
+## 4.28.0 (2026-11-07)
+- **Handy-App**: notist gibt es jetzt auch fürs Handy. Notizen und Words-Dokumente werden im WLAN in beide Richtungen abgeglichen – gekoppelt wird wie bei musicalist: Einstellungen → Handy → „Handy koppeln“, Code in der App eintippen. Verschlüsselt, nur gekoppelte Geräte, Port 37527/tcp.
+- Ändern PC und Handy denselben Eintrag, bleibt der neuere Stand und der andere als Kopie „(konflikt)“ – es geht nichts verloren. Vom Handy überschriebene Stände landen vorher im Versionsverlauf.
+- Neue Einträge vom Handy bekommen wie gewohnt ihre Datei im notist-Ordner (.md / .docx); außerhalb geänderte Dateien werden vor dem Abgleich frisch eingelesen. LaTeX bleibt am PC.
+
+## 4.27.0 (2026-11-05)
+- **PDF-Ansicht gestochen scharf**: Gerendert wird jetzt mit dem echten Skalierungsfaktor (z. B. 1,5) in ganzen Geräte-Pixeln, ohne das frühere Auf-2-Runden und weiche Herunterrechnen.
+- **Suche in der PDF** (Strg+F in der PDF, „suchen“): Treffer auf allen Seiten markiert, „3 / 12“, Enter/Umschalt+Enter springt.
+- **Seitenanzeige „3 / 18“** schwebt mit; **Zoom, Seite, Lesemodus und Seitenmodus werden je PDF gemerkt**. Neu: „breite“, „ganze seite“.
+- **Lesemodus**: dunkles, ans Thema getöntes Papier mit heller Schrift und dunklem Block-Rahmen; farbige Abbildungen und Schrift behalten ihre Farben.
+- **Werkzeugleiste nur noch mit Symbolen** im Stil der Words-Leiste; ein Klick auf die Prozentzahl setzt auf Seitenbreite zurück. Zwei Seiten nutzen mehr Breite als eine.
+- **Fix**: Beim Klick in eine PDF (z. B. Suche) erschien ein riesiger farbiger Balken – der Text-Cursor des Dokuments, der auf der Blockzeile saß, ist jetzt ausgeblendet, solange der Fokus in der PDF liegt.
+- **Markieren & Anmerken**: Markierter Text → gelb/grün/blau/rosa/unterstrichen (bleibt im Dokument), „als zitat“ setzt den Text mit Seitenzahl unter die PDF. Rechtsklick auf eine Markierung entfernt sie.
+- **Zwei Seiten nebeneinander** und **Vollbild** (Esc beendet, Bild↑/↓ blättert).
+- **Links in der PDF** sind klickbar (Webadressen, Sprünge innerhalb der PDF).
+
+## 4.26.0 (2026-11-03)
+- **Eingebettete PDFs (Words, auch „fließend“)**: Aufgeklappte PDFs lassen sich jetzt zoomen (Pinch auf der PDF, Strg+Mausrad, Knöpfe − / % / + neben „ausblenden“); der Zoom gilt nur für die PDF, nicht fürs Dokument. Ist sie breiter als der Block (Zoom oder halbes Fenster), wischt man waagerecht darin; das 2-Finger-Zurück bleibt dabei aus dem Weg.
+- **Text markieren und kopieren**: Ziehen markiert, Doppelklick ein Wort, Dreifachklick die Zeile; Strg+C, Rechtsklick (Kopieren / Alles auswählen) oder Mittelklick-Ablage.
+
 ## 4.25.0 (2026-11-01)
 - **Scroll-Ende**: Wer am Ende einer Seite weiterscrollt, sieht aus der Kante einen Verlauf aus ░ ▒ ▓ █ aufsteigen, am Mauszeiger am höchsten. Die Liste bewegt sich dabei nicht und der Effekt läuft ohne Überschwingen aus. Er erscheint nur, wenn kein umgebendes Scroll-Fenster mehr weiterscrollen kann. Abschalten: `"scroll_end": false` in ~/.config/rice-apps/settings.json oder Energiesparmodus.
 

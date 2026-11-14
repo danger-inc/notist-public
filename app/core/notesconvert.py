@@ -3,7 +3,8 @@
 # LaTeX → Words versteht die üblichen Befehle; Unbekanntes bleibt als lesbarer Text erhalten.
 import base64, os, re
 
-import docfmt as df
+from core import docfmt as df
+from core import paths
 
 SPECIAL = {"\\": "\\textbackslash{}", "{": "\\{", "}": "\\}", "$": "\\$", "&": "\\&", "%": "\\%", "#": "\\#",
            "_": "\\_", "^": "\\textasciicircum{}", "~": "\\textasciitilde{}", "„": "\\glqq{}", "“": "\\grqq{}",
@@ -51,6 +52,7 @@ def run_tex(r, pkgs):
 
 def blocks_to_latex(blocks, title="", page=None, image_dir=None):
     """→ LaTeX-Quelltext. Bilder werden nach image_dir geschrieben (falls angegeben)."""
+    blocks = df.expand_sheets(blocks)
     pkgs = {"amsmath", "graphicx"}
     body, nums = [], 0
     cfg = df.norm_page(page)
@@ -295,7 +297,7 @@ def inline_runs(s, props=None, image_dir=None):
                     path = os.path.join(image_dir, fn) if image_dir else fn
                     for cand in (path, path + ".png", path + ".jpg"):
                         if os.path.isfile(cand):
-                            data = open(cand, "rb").read()
+                            data = paths.read_file(cand, True)
                             mime = df.sniff_mime(data)
                             if mime:
                                 w, h = df.image_size(data)

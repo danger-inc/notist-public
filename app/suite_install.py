@@ -84,7 +84,7 @@ def launcher(cmd):
 
 def installed_version(key):
     try:
-        return open(H(APPS[key]["version"])).read().strip()
+        return open(H(APPS[key]["version"]), encoding="utf-8").read().strip()
     except OSError:
         return ""
 
@@ -292,7 +292,7 @@ def install(key, step):
         if ok and not after:
             ok, text = False, "installiert, aber keine Version gefunden"
         return ok, (f"v{before} → v{after}" if ok and before and before != after else f"v{after} installiert") if ok else text, None
-    with open(log_path(key), "w") as log:
+    with open(log_path(key), "w", encoding="utf-8") as log:
         log.write(f"{time.strftime('%Y-%m-%d %H:%M:%S')}  {key}  (vorher: {before or state(key)})\n")
         try:
             src = fetch_repo(key, log, step)
@@ -306,7 +306,7 @@ def install(key, step):
         if ok:
             cleanup_after(key, had, log)
         log.write(f"\nende: rc={rc}, version={installed_version(key) or '-'}\n")
-    text = open(log_path(key), errors="replace").read()
+    text = open(log_path(key), errors="replace", encoding="utf-8").read()
     hint = "packages" if re.search(r"a terminal is required|password is required|sudo: |FEHLT|nicht vollständig"
                                    r"|ModuleNotFoundError|Namespace Gtk not available", text) else None
     if not ok:
@@ -412,7 +412,7 @@ class Manager:
             return
         cache = {}
         try:
-            cache = json.load(open(changelog.UPDATE_FILE))
+            cache = json.load(open(changelog.UPDATE_FILE, encoding="utf-8"))
         except (OSError, ValueError, AttributeError):
             pass
         todo = []
@@ -435,7 +435,7 @@ class Manager:
             with ThreadPoolExecutor(4) as ex:
                 res = dict(zip(todo, ex.map(changelog.latest_version, todo)))
             try:
-                data = json.load(open(changelog.UPDATE_FILE))
+                data = json.load(open(changelog.UPDATE_FILE, encoding="utf-8"))
             except (OSError, ValueError):
                 data = {}
             for k, v in res.items():
@@ -444,7 +444,7 @@ class Manager:
             try:
                 os.makedirs(os.path.dirname(changelog.UPDATE_FILE), exist_ok=True)
                 tmp = f"{changelog.UPDATE_FILE}.{os.getpid()}"
-                json.dump(data, open(tmp, "w"), indent=1)
+                json.dump(data, open(tmp, "w", encoding="utf-8"), indent=1)
                 os.replace(tmp, changelog.UPDATE_FILE)
             except OSError:
                 pass
