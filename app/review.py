@@ -8,6 +8,7 @@ import uuid
 import gi
 gi.require_version("Gtk", "4.0")
 from gi.repository import Gdk, GLib, Gtk, Pango
+import i18n
 
 
 class ReviewMixin:
@@ -82,7 +83,7 @@ class ReviewMixin:
     # ---------------------------------------------------------------- Kommentare
     def author_name(self):
         real = GLib.get_real_name()
-        return self.page.get("author") or (real if real and real != "Unknown" else "") or GLib.get_user_name() or "notist"
+        return getattr(self, "collab_author", None) or self.page.get("author") or (real if real and real != "Unknown" else "") or GLib.get_user_name() or "notist"
 
     def comment_at(self, it):
         for t in it.get_tags():
@@ -288,6 +289,7 @@ class ReviewMixin:
         try:
             self.buf.remove_tag(self.tc_del, start, end)
             self.buf.apply_tag(self.tc_ins, start, end)
+            self.mark_author(start, end)
         finally:
             self._tc_busy = False
 
@@ -319,6 +321,7 @@ class ReviewMixin:
             for s0, s1, own in segs:
                 if not own:
                     buf.apply_tag(self.tc_del, buf.get_iter_at_offset(s0), buf.get_iter_at_offset(s1))
+                    self.mark_author(buf.get_iter_at_offset(s0), buf.get_iter_at_offset(s1))
         finally:
             self._tc_busy = False
         dels = [(s0, s1) for s0, s1, own in segs if own]
@@ -336,6 +339,20 @@ class ReviewMixin:
             self.changed()
             return False
         GLib.idle_add(finish)
+
+    def mark_author(self, s, e):
+        """Wer die Änderung gemacht hat (gemeinsam bearbeiten: Kontoname) – unsichtbarer Tag tcby:<name>."""
+        self.clear_author(s, e)
+        self.buf.apply_tag(self.tag("tcby:" + self.author_name()), s, e)
+
+    def clear_author(self, s, e):
+        tags = []
+        self.buf.get_tag_table().foreach(lambda t: tags.append(t) if (t.props.name or "").startswith("tcby:") else None)
+        for t in tags:
+            self.buf.remove_tag(t, s, e)
+
+    def author_at(self, it):
+        return next(((t.props.name or "")[5:] for t in it.get_tags() if (t.props.name or "").startswith("tcby:")), "")
 
     def change_at(self, it):
         for t in it.get_tags():
@@ -368,6 +385,7 @@ class ReviewMixin:
             keep = (tag is self.tc_ins) == accept                 # Einfügung annehmen / Löschung ablehnen = Text bleibt
             if keep:
                 self.buf.remove_tag(tag, s, e)
+                self.clear_author(s, e)
             else:
                 self.buf.delete(s, e)
         finally:
@@ -388,6 +406,7 @@ class ReviewMixin:
                     s, e = self.change_bounds(it, tag)
                     if keep:
                         self.buf.remove_tag(tag, s, e)
+                        self.clear_author(s, e)
                     else:
                         self.buf.delete(s, e)
         finally:
@@ -418,3 +437,7 @@ class ReviewMixin:
         target = self.buf.get_iter_at_offset(pick)
         self.buf.place_cursor(target)
         self.view.scroll_to_iter(target, 0.15, True, 0, 0.3)
+        who = self.author_at(target)
+        app = self.win.get_application() if self.win else None
+        if who and app is not None and hasattr(app, "notify"):
+            app.notify(i18n.tr("{} von {}", i18n.tr("Einfügung") if target.has_tag(self.tc_ins) else i18n.tr("Löschung"), who))

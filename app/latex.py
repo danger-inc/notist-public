@@ -397,6 +397,8 @@ class PdfPreview(Gtk.Box):
         bar.append(self.zoom_btn)
         bar.append(tool("+", "Größer", lambda *_: self.step(1)))
         bar.append(tool("󰏌", "Im PDF-Programm öffnen", lambda *_: self.open_external()))
+        self.on_full = None
+        bar.append(tool("󰊓", "Vorschau im Vollbild (Esc oder F11 beendet)", lambda *_: self.on_full and self.on_full()))
         self.append(bar)
         self.scroll.get_vadjustment().connect("value-changed", lambda *_: self.update_page_label())
         self.on_inverse = None
@@ -429,7 +431,7 @@ class PdfPreview(Gtk.Box):
             doc = Poppler.Document.new_from_bytes(GLib.Bytes.new(data), None)
         except (OSError, GLib.Error):
             return
-        self.doc, self.path = doc, path
+        self.doc, self.path, self._bytes = doc, path, data
         self.stack.set_visible_child_name("pdf")
         self.queue_render(0)
 
@@ -445,6 +447,8 @@ class PdfPreview(Gtk.Box):
         return max(0.2, (avail - 30) / page_w)
 
     def render(self):
+        """Seiten im Hintergrund rendern (eigenes Poppler-Dokument im Faden), die sichtbaren zuerst. Bis die neue
+        Textur da ist, bleibt die alte (skaliert) stehen – kein Weißblitz, kein Ruckeln bei großen Fenstern/PDFs."""
         self._render_id = None
         if not self.doc:
             return False
@@ -458,33 +462,53 @@ class PdfPreview(Gtk.Box):
         native = self.get_native()
         surf = native.get_surface() if native else None
         dpr = surf.get_scale() if surf and hasattr(surf, "get_scale") else self.get_scale_factor()
-        todo = list(range(n))
-
-        def step():
-            if not todo or not self.doc:
-                return False
-            i = todo.pop(0)
-            if i >= len(self.pages):
-                return False
-            page = self.doc.get_page(i)
-            pw, ph = page.get_size()
+        jobs = []
+        for i in range(n):
+            pw, ph = self.doc.get_page(i).get_size()
             s = self.scale_for(pw)
-            W, H = max(1, int(pw * s * dpr)), max(1, int(ph * s * dpr))
-            img = cairo.ImageSurface(cairo.FORMAT_ARGB32, W, H)
-            cr = cairo.Context(img)
-            cr.set_source_rgb(1, 1, 1)
-            cr.paint()
-            cr.scale(s * dpr, s * dpr)
-            page.render(cr)
-            img.flush()
-            tex = Gdk.MemoryTexture.new(W, H, Gdk.MemoryFormat.B8G8R8A8_PREMULTIPLIED,
-                                        GLib.Bytes.new(bytes(img.get_data())), img.get_stride())
-            self.pages[i].set_page(tex, pw * s, ph * s)
+            self.pages[i].set_page(self.pages[i].tex, pw * s, ph * s)
             self.pages[i].scale = s
-            return bool(todo)
-        step()                    # erste Seite sofort, Rest im Leerlauf
-        if todo:
-            GLib.idle_add(step)
+            jobs.append((i, s))
+        vadj = self.scroll.get_vadjustment()
+        heights = [p.h + 14 for p in self.pages] or [1]
+        first, y = 0, 0
+        for k, h in enumerate(heights):
+            if y + h > vadj.get_value():
+                first = k
+                break
+            y += h
+        jobs.sort(key=lambda j: (j[0] < first, abs(j[0] - first)))      # sichtbare Seite und die danach zuerst
+        self._gen = gen = getattr(self, "_gen", 0) + 1
+        data = getattr(self, "_bytes", None)
+
+        def apply(i, tex):
+            if gen == self._gen and i < len(self.pages):
+                self.pages[i].set_page(tex, self.pages[i].w, self.pages[i].h)
+            return False
+
+        def work():
+            try:
+                doc = Poppler.Document.new_from_bytes(GLib.Bytes.new(data), None)
+            except (GLib.Error, TypeError):
+                return
+            for i, s in jobs:
+                if gen != self._gen:
+                    return
+                page = doc.get_page(i)
+                pw, ph = page.get_size()
+                W, H = max(1, int(pw * s * dpr)), max(1, int(ph * s * dpr))
+                img = cairo.ImageSurface(cairo.FORMAT_ARGB32, W, H)
+                cr = cairo.Context(img)
+                cr.set_source_rgb(1, 1, 1)
+                cr.paint()
+                cr.scale(s * dpr, s * dpr)
+                page.render(cr)
+                img.flush()
+                tex = Gdk.MemoryTexture.new(W, H, Gdk.MemoryFormat.B8G8R8A8_PREMULTIPLIED,
+                                            GLib.Bytes.new(bytes(img.get_data())), img.get_stride())
+                GLib.idle_add(apply, i, tex)
+        if data is not None:
+            threading.Thread(target=work, daemon=True, name="pdf-render").start()
         self.update_page_label()
         return False
 
@@ -649,6 +673,8 @@ class LatexEditor(Gtk.Box):
         self.side = Gtk.Stack(vexpand=True, transition_type=Gtk.StackTransitionType.CROSSFADE, vhomogeneous=False)
         self.preview = PdfPreview(self.settings)
         self.preview.on_inverse = self.inverse_search
+        self.preview.on_full = lambda: self.preview_full(not self._pfull)
+        self._pfull = False
         self.side.add_named(self.preview, "preview")
         self.side.add_named(self.build_setup(), "setup")
         self.side.add_named(self.build_help(), "help")
@@ -659,6 +685,8 @@ class LatexEditor(Gtk.Box):
         self.paned.add_css_class("tex-split")
         self.paned.set_start_child(left)
         self.paned.set_end_child(right)
+        self.left_box, self.right_box = left, right
+        right.set_visible(self.settings.get("preview_pane", True))
         left.set_size_request(260, 70)        # niedrig halten: passt auch in kleine Kachelfenster
         right.set_size_request(240, 70)
         self.paned.connect("notify::position", self.on_paned_moved)
@@ -751,7 +779,10 @@ class LatexEditor(Gtk.Box):
             row.append(sw)
             opts.append(row)
         hb, _ = popover_button("󰌵", "Schreibhilfen ein-/ausschalten", opts)
-        g = group(ob, self.find_btn, tool("󰈈", "Cursorzeile im PDF zeigen (Strg+J)\nUmgekehrt: Doppelklick ins PDF",
+        self.pane_btn = tool("󰈙", "Vorschau ein-/ausblenden – aus: nur der Quelltext, kompiliert wird trotzdem",
+                             lambda b: self.show_pane(b.get_active()), toggle=True)
+        self.pane_btn.set_active(self.settings.get("preview_pane", True))
+        g = group(ob, self.find_btn, self.pane_btn, tool("󰈈", "Cursorzeile im PDF zeigen (Strg+J)\nUmgekehrt: Doppelklick ins PDF",
                                          lambda *_: self.forward_search()))
         g = group(tool("󰘦 Befehle", "Alle LaTeX-Befehle mit Erklärung (F1)", lambda *_: self.open_overview()),
                   tool("󰏗", "LaTeX-Pakete: suchen, vorab laden, Speicherordner öffnen", lambda *_: self.open_packages()),
@@ -1245,8 +1276,8 @@ class LatexEditor(Gtk.Box):
         else:
             self.preview.clear()
         self.fill_file_tabs()
-        if text.strip() and self.compilers and self.settings["live"]:
-            self.schedule_compile(300)
+        if text.strip() and self.compilers and self.settings["live"] and self.pdf_stale(text):
+            self.schedule_compile(300)          # nur wenn sich seit dem letzten PDF etwas geändert hat
         GLib.idle_add(lambda: self.view.scroll_to_iter(self.buf.get_start_iter(), 0, False, 0, 0) and False)
 
     def text(self):
@@ -2542,6 +2573,7 @@ class LatexEditor(Gtk.Box):
         if not hit:
             self.notify("Diese Zeile steht (noch) nicht im PDF – erst kompilieren")
             return
+        self.show_pane(True)
         self.side_btns["preview"].set_active(True)
         self.preview.show_location(*hit)
 
@@ -2782,11 +2814,52 @@ class LatexEditor(Gtk.Box):
     def shutdown(self):
         self.kill()
 
+    def pdf_stale(self, text):
+        """Passt das vorhandene PDF schon zum Quelltext? (Öffnen soll nicht jedes Mal neu kompilieren.)"""
+        tex = os.path.join(getattr(self, "proj", None) or os.path.join(FILES, self.nid or "-"), "main.tex")
+        pdf = os.path.join(BUILD, self.nid or "-", "main.pdf")
+        try:
+            with open(tex, encoding="utf-8") as f:
+                same = f.read() == text
+            return not (same and os.path.getmtime(pdf) >= os.path.getmtime(tex))
+        except OSError:
+            return True
+
     def pdf_path(self):
         p = os.path.join(BUILD, self.nid or "-", "main.pdf")
         return p if os.path.exists(p) else None
 
     # ================= Layout =================
+    def show_pane(self, on):
+        """Vorschau rechts ein/aus (gemerkt). Aus = Quelltext über die ganze Breite."""
+        if not hasattr(self, "right_box"):
+            return
+        self.settings["preview_pane"] = bool(on)
+        self.right_box.set_visible(bool(on))
+        if self.pane_btn.get_active() != bool(on):
+            self.pane_btn.set_active(bool(on))
+        if not on and self._pfull:
+            self.preview_full(False)
+
+    def preview_full(self, on):
+        """Vorschau im Vollbild: Quelltext weg, notist ins Vollbild (Esc/F11 holt beides zurück)."""
+        on = bool(on)
+        if on == self._pfull:
+            return
+        self._pfull = on
+        if on:
+            self.show_pane(True)
+            self.side_btns["preview"].set_active(True)
+        self.left_box.set_visible(not on)
+        app = self.win.get_application() if self.win else None
+        if app is not None and hasattr(app, "set_zen") and app.zen != on:
+            app.set_zen(on)
+
+    def end_preview_full(self):
+        if self._pfull:
+            self._pfull = False
+            self.left_box.set_visible(True)
+
     def on_paned_moved(self, *_):
         w = self.paned.get_width()
         if not self._paned_init:

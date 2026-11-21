@@ -80,6 +80,8 @@ def cache_dir():
 
 def docs_dir():
     """„Dokumente“ des Nutzers (darin liegt der notist-Dateiordner)."""
+    if os.environ.get("NOTES_DOCS_DIR"):         # Tests: nie in den echten Dokumente-Ordner schreiben
+        return os.environ["NOTES_DOCS_DIR"]
     if SYSTEM == "linux":
         d = None
         try:

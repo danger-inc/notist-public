@@ -612,3 +612,369 @@ def m_snapshot(kind, nid):
         st = m._store(kind)
         n = m._find(kind, nid)
         return st.snapshot(n, force=True) is not None
+
+
+# ---------------- Gemeinsam bearbeiten (Handy) ----------------
+# Jede freigegebene Sitzung mit lokalem Eintrag läuft (core.collab.Live in Python-Fäden) – auch wenn das Dokument zu ist:
+# dann kommen fremde Änderungen direkt in den gespeicherten Eintrag („store“). Ist das Dokument im Editor offen, ist
+# die Sitzung „gebunden“ („editor“): Kotlin schiebt seinen Stand (m_collab_sync) und holt Fremdes ab.
+# Brücke Editor ↔ Live: kdoc = Stand, den der Editor zuletzt hatte; R = fremde Änderungen, die ihm noch fehlen.
+# Immer gilt local == apply(kdoc, R). Eingaben kommen als Zuwachs seit dem letzten Push und werden über R gehoben.
+import threading as _th
+_CO = {"acct": None, "lock": _th.RLock(), "live": None, "conns": {}}
+
+
+def _co_acct():
+    from core import collab, paths
+    if _CO["acct"] is None:
+        _CO["acct"] = collab.Account(os.path.join(paths.HOME, "collab.json"))
+    return _CO["acct"]
+
+
+def _co_key(s):
+    a = _co_acct()
+    k = a.link(s["id"])
+    m = _mob()
+    for key in ([k] if k else []) + ([s["doc_key"]] if s["owner"] == a.name else []):
+        kind, _, nid = (key or "").partition(":")
+        if kind in ("notes", "docs", "latex") and m.get(kind, nid) is not None:
+            return key
+    return None
+
+
+def _co_people(s):
+    from core import collab
+    names = [s["owner"]] + list(s.get("members") or [])
+    return names, collab.colors_for(names)
+
+
+def _co_start(s, key):
+    """Verbindung für eine Sitzung (zunächst im Hintergrund: Änderungen direkt in den gespeicherten Eintrag)."""
+    from core import collab
+    a = _co_acct()
+    kind, _, nid = key.partition(":")
+    ckey = a.key_for(s)
+    st = {"sid": s["id"], "key": key, "kind": kind, "nid": nid, "s": s, "mode": "store", "entry": {}, "local": None,
+          "kdoc": None, "R": [], "gen": 0, "pending": False, "cursors": [], "state": {}, "undo": None}
+
+    def post(fn):
+        with _CO["lock"]:
+            fn()
+
+    def get_doc():
+        if st["mode"] == "editor":
+            return collab.deep(st["local"])
+        n = _mob().get(kind, nid)
+        return collab.entry_to_doc(kind, n) if n else [{"insert": "\n"}]
+
+    def apply_remote(d, doc):
+        if st["mode"] == "editor":
+            st["R"] = collab.compose(st["R"], d)
+            st["local"] = doc
+            st["gen"] += 1
+            st["pending"] = True
+            return
+        m = _mob()
+        n = m.get(kind, nid)
+        if n is not None:
+            collab.doc_into_entry(kind, doc, n)
+            if kind == "docs":
+                n["text"] = docfmt.plain_text(n["blocks"])
+            m.save(kind, n)
+
+    origin = s["owner"] == a.name and a.link(s["id"]) == key
+    st["live"] = collab.Live(a, s["id"], origin, get_doc, apply_remote, post, lambda x: st.__setitem__("state", x),
+                             lambda c: st.__setitem__("cursors", c), key=ckey,
+                             get_cursor=lambda: st.get("cur") if st["mode"] == "editor" else None)
+    _CO["conns"][s["id"]] = st
+    st["live"].start()
+    return st
+
+
+def _co_connect_all(sessions):
+    """Alle freigegebenen Sitzungen mit lokalem Eintrag verbinden; beendete trennen."""
+    from core import collab
+    alive = set()
+    with _CO["lock"]:
+        for s in sessions or []:
+            key = s.get("key")
+            if s.get("status") != "active" or not key:
+                continue
+            alive.add(s["id"])
+            st = _CO["conns"].get(s["id"])
+            if st is not None:
+                st["s"] = s
+                continue
+            try:
+                _co_start(s, key)
+                s.pop("problem", None)
+            except collab.CollabError as e:
+                s["problem"] = str(e)
+        for sid in [x for x in _CO["conns"] if x not in alive]:
+            _co_drop(sid)
+
+
+def _co_drop(sid):
+    st = _CO["conns"].pop(sid, None)
+    if st is None:
+        return
+    if _CO["live"] is st:
+        _CO["live"] = None
+    try:
+        if st["live"].ready:
+            st["live"].local_changed()
+    finally:
+        st["live"].close()
+
+
+def m_collab_state():
+    """→ {name, sessions (zuletzt geholt, mit „key“ = lokaler Eintrag oder None)}"""
+    a = _co_acct()
+    return {"name": a.name, "server": a.st.get("server"), "sessions": _CO.get("sessions") or [], "has_key": a.has_key}
+
+
+def m_collab_login(name, password):
+    return {"name": _co_acct().login(name, password, "notist-handy")}
+
+
+def m_collab_logout():
+    with _CO["lock"]:
+        for sid in list(_CO["conns"]):
+            _co_drop(sid)
+    _co_acct().logout()
+    _CO["sessions"] = []
+    return True
+
+
+def m_collab_sessions():
+    """Vom Server holen (Netz), alle freigegebenen Sitzungen verbinden. Fehler → {"error"}."""
+    from core import collab
+    a = _co_acct()
+    if not a.token:
+        return {"sessions": [], "error": None, "name": None}
+    try:
+        ss = a.sessions()
+    except collab.CollabError as e:
+        return {"sessions": _CO.get("sessions") or [], "error": str(e), "name": a.name}
+    for s in ss:
+        s["key"] = _co_key(s)
+        if s["owner"] == a.name and s.get("members") and a.has_key:
+            s["code"] = collab.fmt_code(a.code_for(s))          # zum Weitergeben an die Eingeladenen
+        s["has_code"] = s["owner"] == a.name or bool((a.st.get("codes") or {}).get(s["id"]))
+        names, cols = _co_people(s)
+        s["people"] = [{"name": n, "color": cols[n]} for n in names]
+    _CO["sessions"] = ss
+    _co_connect_all(ss)
+    return jsonable({"sessions": ss, "error": None, "name": a.name, "has_key": a.has_key})
+
+
+def m_collab_friends():
+    """musicalist-Freunde (Kontoname + Anzeigename) zum Antippen beim Einladen."""
+    return {"friends": _co_acct().friends()}
+
+
+def m_collab_invite(kind, nid, title, members):
+    from core import collab
+    try:
+        s = _co_acct().invite(kind, title, f"{kind}:{nid}", [x for x in members if x])
+    except collab.CollabError as e:
+        return {"error": str(e)}
+    a = _co_acct()
+    a.link(s["id"], f"{kind}:{nid}")
+    code = None
+    if s.get("members"):
+        try:
+            code = collab.fmt_code(a.code_for(s))
+        except collab.CollabError as e:
+            return {"session": s, "error": str(e)}
+    return {"session": s, "code": code}
+
+
+def m_collab_end(sid):
+    """Trennen (Einladende: für alle beenden; Eingeladene: aussteigen). Die eigene Fassung bleibt."""
+    from core import collab
+    with _CO["lock"]:
+        _co_drop(sid)
+    try:
+        _co_acct().end(sid)
+    except collab.CollabError as e:
+        return {"error": str(e)}
+    _co_acct().unlink(sid)
+    return {"ok": True}
+
+
+def m_collab_code(sid, code):
+    """Sitzungs-Code (von der Einladenden) eintragen → {"ok"} oder {"error"}."""
+    from core import collab
+    try:
+        _co_acct().set_code(sid, code)
+    except collab.CollabError as e:
+        return {"error": str(e)}
+    return {"ok": True}
+
+
+def m_collab_accept(sid, code=None):
+    """Einladung annehmen (mit Sitzungs-Code): neuer leerer Eintrag, mit der Sitzung verknüpft → {kind, id}."""
+    s = next((x for x in _CO.get("sessions") or [] if x["id"] == sid), None)
+    if s is None:
+        return {"error": "unbekannte Sitzung"}
+    if code is not None:
+        r = m_collab_code(sid, code)
+        if r.get("error"):
+            return r
+    m = _mob()
+    n = m.new(s["kind"], None)
+    n["title"] = s.get("title") or f"Gemeinsam mit {s['owner']}"
+    if s["kind"] == "docs":
+        n["blocks"] = [docfmt.para()]
+    n = m.save(s["kind"], n)
+    _co_acct().link(sid, f"{s['kind']}:{n['id']}")
+    s["key"] = f"{s['kind']}:{n['id']}"
+    _co_connect_all(_CO.get("sessions"))
+    return {"kind": s["kind"], "id": n["id"]}
+
+
+def m_collab_join_current(sid, kind, nid, code=None):
+    """Ins gerade offene Dokument beitreten: vorher eine Version sichern, dann übernimmt es den gemeinsamen Stand."""
+    s = next((x for x in _CO.get("sessions") or [] if x["id"] == sid), None)
+    if s is None or s["kind"] != kind:
+        return {"error": "passt nicht zu diesem Dokument"}
+    if code is not None:
+        r = m_collab_code(sid, code)
+        if r.get("error"):
+            return r
+    try:
+        m_snapshot(kind, nid)
+    except Exception:  # noqa: BLE001
+        pass
+    _co_acct().link(sid, f"{kind}:{nid}")
+    s["key"] = f"{kind}:{nid}"
+    _co_connect_all(_CO.get("sessions"))
+    return {"ok": True}
+
+
+def m_collab_bind(kind, nid, entry):
+    """Editor geöffnet: läuft für diesen Eintrag eine Sitzung, an den Editor binden → {"sid"} oder {"sid": None, …}."""
+    from core import collab
+    key = f"{kind}:{nid}"
+    with _CO["lock"]:
+        _co_connect_all(_CO.get("sessions"))
+        st = next((x for x in _CO["conns"].values() if x["key"] == key), None)
+        cur = _CO["live"]
+        if cur is not None and cur is not st:
+            m_collab_unbind(cur["sid"])
+        if st is None:
+            s = next((x for x in _CO.get("sessions") or [] if x.get("key") == key), None)
+            if s is not None and s.get("problem"):
+                return {"sid": None, "problem": s["problem"], "need_code": "Code" in s["problem"], "relogin": "anmelden" in s["problem"]}
+            wait = s is not None and s["status"] == "pending"
+            return {"sid": None, "pending": wait}
+        if st["mode"] == "editor" and _CO["live"] is st:
+            return {"sid": st["sid"]}
+        a = _co_acct()
+        done = a.st.setdefault("snapped", [])            # vor der ersten gemeinsamen Bearbeitung eine Version sichern
+        if f"{st['sid']}:{key}" not in done:
+            try:
+                m_snapshot(kind, nid)
+                done.append(f"{st['sid']}:{key}")
+                del done[:-300]
+                a._save()
+            except Exception:  # noqa: BLE001
+                pass
+        mine = collab.entry_to_doc(kind, entry)
+        lv = st["live"]
+        local = collab.deep(lv.doc) if lv.ready and lv.doc is not None else mine
+        same = collab.text_of(local) == collab.text_of(mine)
+        if same:            # nur anders abgelegt (Absatz-/Lauf-Attribute): Editor-Fassung gilt, nichts an den Editor liefern
+            local = mine    # – sonst setzt Android beim ersten Tippen das Textfeld neu (vertauschte Buchstaben)
+        st.update(mode="editor", entry=dict(entry), kdoc=mine, local=local, R=[] if same else collab.diff(mine, local),
+                  undo=None, cur=None)
+        st["pending"] = bool(st["R"])
+        _CO["live"] = st
+        if same and lv.ready:
+            lv.local_changed()
+        return {"sid": st["sid"]}
+
+
+def m_collab_push(entry, gen=0, cursor=-1):
+    """Stand aus dem Editor nach eigener Eingabe (cursor = Position im Dokument, macht den Unterschied eindeutig)."""
+    from core import collab
+    with _CO["lock"]:
+        st = _CO["live"]
+        if st is None:
+            return False
+        mine = collab.entry_to_doc(st["kind"], entry)
+        st["entry"] = dict(entry)
+        if cursor >= 0:
+            st["cur"] = cursor
+        typ = collab.diff(st["kdoc"], mine, cursor if cursor >= 0 else None)
+        if not typ:
+            return True
+        R = st["R"]
+        st["kdoc"] = mine
+        if R:
+            st["local"] = collab.apply(st["local"], collab.transform(R, typ, True))
+            st["R"] = collab.transform(typ, R, False)
+        else:
+            st["local"] = mine
+        st["live"].local_changed(collab.transform_pos(cursor, R) if cursor >= 0 and R else (cursor if cursor >= 0 else None))
+        return True
+
+
+def m_collab_pull(gen=0, cursor=-1, want=True):
+    """→ {gen, entry (nur wenn dem Editor fremde Änderungen fehlen und want), people (Name, Farbe, da), cursors
+    (by, i, j, color – im Dokument), ready, error, ended}. want=False: gerade wird getippt – noch nicht ausliefern
+    (Android setzt sonst das Textfeld unter der Tastatur neu, Buchstaben können vertauscht werden)."""
+    from core import collab
+    with _CO["lock"]:
+        st = _CO["live"]
+        if st is None:
+            return {"gen": gen, "ended": True}
+        lv = st["live"]
+        if cursor >= 0 and cursor != st.get("sent_cur"):
+            st["sent_cur"] = cursor
+            lv.cursor(cursor)
+        names, cols = _co_people(st["s"])
+        here = {c.get("by") for c in st["cursors"]}
+        me = _co_acct().name
+        out = {"gen": st["gen"], "online": sorted(here), "ready": lv.ready, "error": st["state"].get("error"),
+               "ended": bool(st["state"].get("ended")), "badkey": bool(st["state"].get("badkey")),
+               "relogin": bool(st["state"].get("relogin")),
+               "people": [{"name": n, "color": cols[n], "here": n in here or n == me, "me": n == me} for n in names],
+               "cursors": [dict(c, color=cols.get(c.get("by"), collab.color_for(c.get("by") or "?"))) for c in st["cursors"]]}
+        if want and st["pending"]:
+            out["entry"] = collab.doc_into_entry(st["kind"], collab.deep(st["local"]), dict(st["entry"]))
+            st["undo"] = (st["kdoc"], st["R"])           # falls der Editor die Auslieferung nicht übernehmen kann
+            st["kdoc"], st["R"], st["pending"] = st["local"], [], False
+        else:
+            st["undo"] = None
+        return jsonable(out)
+
+
+def m_collab_sync(entry=None, cursor=-1, want=True, rejected=False):
+    """Ein Aufruf je Runde (Handy): rejected = die letzte Auslieferung wurde NICHT übernommen (dazwischen getippt) →
+    Zustand davor wiederherstellen; dann eigenen Stand übernehmen (push) und ggf. Fremdes ausliefern (pull)."""
+    from core import collab
+    with _CO["lock"]:
+        st = _CO["live"]
+        if st is not None and rejected and st.get("undo"):
+            kdoc, R = st["undo"]                         # seit der Auslieferung Angekommenes baut auf ihr auf
+            st["kdoc"], st["R"] = kdoc, collab.compose(R, st["R"])
+            st["undo"] = None
+            st["pending"] = True
+        if entry is not None:
+            m_collab_push(entry, 0, cursor)
+        return m_collab_pull(0, cursor, want)
+
+
+def m_collab_unbind(sid=None):
+    """Editor geschlossen: die Verbindung bleibt im Hintergrund (Änderungen landen dann im gespeicherten Eintrag)."""
+    with _CO["lock"]:
+        st = _CO["live"]
+        if st is None or (sid and st["sid"] != sid):
+            return False
+        if st["live"].ready:
+            st["live"].local_changed()
+        st["mode"] = "store"
+        _CO["live"] = None
+        return True

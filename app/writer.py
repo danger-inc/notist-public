@@ -1500,6 +1500,7 @@ class Writer(ImageObjects, ReviewMixin, Gtk.Box):
         self.append(self.build_findbar())
 
         self.view = PageView(self)
+        self.view.add_css_class("wdoc")
         calm_handles(self.view)
         self.buf = self.view.get_buffer()
         self.buf.set_enable_undo(False)              # eigene Rückgängig-Funktion (GTKs kennt keine Formatierung)
@@ -2088,8 +2089,12 @@ class Writer(ImageObjects, ReviewMixin, Gtk.Box):
 
     def set_flow(self, on, user=False):
         """Ansicht wechseln: „seiten“ (wie Word) ↔ „fließend“ (wie Notion). Inhalt und Datei bleiben gleich."""
-        self.flow = bool(on)
+        was, self.flow = self.flow, bool(on)
         self.flowx.leave()
+        if was != self.flow:                # jede Ansicht hat ihren eigenen Zoom („fließend“ nie „Seitenbreite“)
+            self._zoom_stop()
+            self.set_zoom(self.settings.get("flow_zoom", 1.0) if self.flow else self.settings.get("zoom", self.zoom),
+                          user=False)
         self.ribbon_box.set_visible(not self.flow)
         self.flowbar.set_visible(self.flow)
         self._move_link_pop()
@@ -2402,6 +2407,8 @@ class Writer(ImageObjects, ReviewMixin, Gtk.Box):
             self.focus_text()
 
     def fit_width(self):
+        if self.flow:                       # fließend hat keine Seitenbreite: zurück auf 100 %
+            return self.zoom_to(1.0)
         self.fit = True
         self.settings["fit"] = True
         self.update_geometry()
@@ -2601,6 +2608,7 @@ class Writer(ImageObjects, ReviewMixin, Gtk.Box):
     def make_tags(self):
         b = self.buf
         self.zoom_tag = b.create_tag("zoom", scale=self.zoom)      # zuerst angelegt: niedrigste Priorität
+        self._zoom_css(self.zoom)
         for s, props in STYLE_TAG.items():
             b.create_tag("ps:" + s, **props)
         self.quote_fg = b.create_tag("ps-quote-fg")
@@ -2676,7 +2684,7 @@ class Writer(ImageObjects, ReviewMixin, Gtk.Box):
             return t
         if name.startswith("cm:"):
             return self.comment_tag(name[3:])
-        if name.startswith("pi:"):
+        if name.startswith(("pi:", "tcby:")):          # tcby: wer die nachverfolgte Änderung gemacht hat (unsichtbar)
             return self.buf.create_tag(name)
         if name.startswith("m:"):
             t = self.buf.create_tag(name)
@@ -2890,6 +2898,48 @@ class Writer(ImageObjects, ReviewMixin, Gtk.Box):
         self.cancel_scroll_reset()
         self._reset_src = GLib.idle_add(self._scroll_reset)
 
+    def replace_lines(self, l0, l1, blocks):
+        """Zeilen l0..l1 durch `blocks` ersetzen (gemeinsames Bearbeiten: fremde Änderung). Wie load(), nur für einen
+        Ausschnitt – Cursor, Scrollstelle und Rückgängig bleiben, gelöschte Tabellen/Bilder werden abgeräumt."""
+        buf = self.buf
+        last = buf.get_line_count() - 1
+        l1 = min(l1, last)
+        self._loading = True
+        try:
+            start = buf.get_iter_at_line(l0)[1]
+            trailing = l1 < last
+            end = buf.get_iter_at_line(l1 + 1)[1] if trailing else buf.get_end_iter()
+            if not blocks and not trailing and l0 > 0:          # letzte Zeilen ganz weg: auch den Umbruch davor
+                start = buf.get_iter_at_line(l0 - 1)[1]
+                if not start.ends_line():
+                    start.forward_to_line_end()
+            off = start.get_offset()
+            buf.delete(start, end)
+            for anchor in [a for a in self.blocks if a.get_deleted()]:
+                self.blocks.pop(anchor, None)
+            mark = buf.create_mark(None, buf.get_iter_at_offset(off), False)
+            paras = []
+            for i, b in enumerate(blocks):
+                if i:
+                    buf.insert(buf.get_iter_at_mark(mark), "\n")
+                line = buf.get_iter_at_mark(mark).get_line()
+                if b.get("t") == "p":
+                    for r in b.get("runs") or []:
+                        self.insert_run(r, at=buf.get_iter_at_mark(mark))
+                    paras.append((line, {k: b.get(k) for k in ("style", "align", "list", "indent", "spacing")}))
+                else:
+                    self.insert_anchor(b, buf.get_iter_at_mark(mark))
+            if blocks and trailing:
+                buf.insert(buf.get_iter_at_mark(mark), "\n")
+            for line, a in paras:
+                self.set_para(line, a)
+            buf.apply_tag(self.zoom_tag, buf.get_iter_at_offset(off), buf.get_iter_at_mark(mark))
+            buf.delete_mark(mark)
+        finally:
+            self._loading = False
+        self._numbers = None
+        self.changed()
+
     def _scroll_reset(self):
         self._reset_src = None
         self.scroll.get_vadjustment().set_value(0)
@@ -2957,6 +3007,8 @@ class Writer(ImageObjects, ReviewMixin, Gtk.Box):
             names.append("cm:" + str(r["cm"]))
         if r.get("tc") in ("ins", "del"):
             names.append("tc:" + r["tc"])
+            if r.get("tcby"):
+                names.append("tcby:" + str(r["tcby"]))
         tags = [self.tag(n) for n in names]
         self.buf.insert_with_tags(it, r["text"], *[t for t in tags if t])
 
@@ -2997,6 +3049,8 @@ class Writer(ImageObjects, ReviewMixin, Gtk.Box):
                 r["cm"] = n[3:]
             elif n in ("tc:ins", "tc:del"):
                 r["tc"] = n[3:]
+            elif n.startswith("tcby:"):
+                r["tcby"] = n[5:]
         return r
 
     def to_model(self, lo=None, hi=None):
@@ -4601,7 +4655,7 @@ class Writer(ImageObjects, ReviewMixin, Gtk.Box):
         z = max(0.3, min(3.0, z))
         zp = self._zp
         if zp is None:
-            if self.flow or self.hscroll.get_width() <= 0:   # fließend bricht neu um: Standbild passt nicht → direkt
+            if self.hscroll.get_width() <= 0:
                 return self.zoom_to(z, pt, fast=True)
             pic = self._zp_pic()
             if pic is None:
@@ -4857,7 +4911,7 @@ class Writer(ImageObjects, ReviewMixin, Gtk.Box):
         """Zoom setzen und dabei die Textstelle unter pt (Zeiger/Fingermitte, sonst Bildmitte) festhalten."""
         global PIX_FAST
         z = round(max(0.3, min(3.0, z)), 2)
-        if abs(z - self.zoom) < 0.001 and not (user and self.fit):
+        if abs(z - self.zoom) < 0.001 and not (user and self.fit and not self.flow):
             return
         a = anchor or self._zanchor
         if anchor is None:                       # während eines Halts an derselben Stelle: Anker behalten (Layout noch unfertig)
@@ -5441,6 +5495,22 @@ class Writer(ImageObjects, ReviewMixin, Gtk.Box):
         w = w + (self.vbar.get_width() if self.vbar.get_visible() else 0) - bar
         return max(0.3, min(3.0, round((w - 2 * 16) / (df.page_mm(self.page)[0] * 96 / 25.4), 2)))
 
+    _ZCSS = None
+
+    def _zoom_css(self, z):
+        """Tabellen- und Tabellenblatt-Zellen wachsen mit dem Zoom (Leisten und Knöpfe bleiben gleich groß)."""
+        if Writer._ZCSS is None:
+            Writer._ZCSS = Gtk.CssProvider()
+            Gtk.StyleContext.add_provider_for_display(Gdk.Display.get_default(), Writer._ZCSS,
+                                                      Gtk.STYLE_PROVIDER_PRIORITY_USER + 1)
+        px = lambda v: f"{max(1, round(v * z))}px"
+        Writer._ZCSS.load_from_string(
+            f".wdoc .wtable textview, .wdoc .wtable textview text {{ font-size: {10 * z:.2f}pt; }}\n"
+            f".wdoc .wtable .cell {{ padding: {px(4)} {px(7)}; }}\n"
+            f".wdoc .wtable.pad-compact .cell {{ padding: {px(1)} {px(5)}; }}\n"
+            f".wdoc .wtable.pad-wide .cell {{ padding: {px(9)} {px(12)}; }}\n"
+            f".wdoc .wsh-c, .wdoc .wsh-h {{ font-size: {9 * z:.2f}pt; padding: {px(2)} {px(7)}; }}\n")
+
     def _apply_fit(self):
         self._fit_id = None
         t = self._fit_target()
@@ -5450,7 +5520,7 @@ class Writer(ImageObjects, ReviewMixin, Gtk.Box):
 
     def set_zoom(self, z, user=True):
         z = round(max(0.3, min(3.0, z)), 2)
-        if user and self.fit:
+        if user and self.fit and not self.flow:
             self.fit = False
             self.settings["fit"] = False
             self.update_geometry()
@@ -5458,8 +5528,9 @@ class Writer(ImageObjects, ReviewMixin, Gtk.Box):
             return
         self.zoom = z
         if user:
-            self.settings["zoom"] = z
+            self.settings["flow_zoom" if self.flow else "zoom"] = z
         self.zoom_tag.props.scale = z
+        self._zoom_css(z)
         self._sticky = self._breaks is not None
         self.update_rise()
         self.update_tabs()

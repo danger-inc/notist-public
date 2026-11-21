@@ -17,7 +17,7 @@
 # Schritt 20 entfernt (Handy 1.0 spricht nur v2).
 import hashlib, hmac, json, os, secrets, socket, threading, time, uuid
 
-from core import paths, sync2
+from core import docfmt as df, paths, sync2
 
 PORT = int(os.environ.get("NOTES_HANDY_PORT") or 37527)     # Tests: eigener Port je Instanz
 KINDS = ("notes", "docs")                     # v1: LaTeX bleibt am PC
@@ -731,6 +731,8 @@ class AppBackend(sync2.Backend):
             self.app.save_prefs()
 
     def merge(self, key, a, b):
+        if key.startswith(("notes:", "docs:")):
+            return self.merge_same(a, b)
         if not key.startswith("prefs:"):
             return None
         va, vb = a.get("v"), b.get("v")
@@ -742,6 +744,20 @@ class AppBackend(sync2.Backend):
                 out[k] = max(out[k], x, key=sync2.canon) if k in out else x
             return {"v": out}
         return None
+
+
+    @staticmethod
+    def merge_same(a, b):
+        """Gleichzeitig geändert, aber Titel und Text gleich (z. B. nur anders abgespeichert, oder beide Seiten haben
+        dasselbe getippt): keine Konflikt-Kopie, der neuere Stand gewinnt. Sonst None → Kopie."""
+        def txt(c):
+            return df.plain_text(c["blocks"]) if c.get("blocks") else (c.get("text") or "")
+        try:
+            if (a.get("title") or "") != (b.get("title") or "") or txt(a) != txt(b):
+                return None
+        except (KeyError, TypeError, AttributeError):
+            return None
+        return dict(b if str(b.get("updated") or "") > str(a.get("updated") or "") else a)
 
 
 # ---------- v2: Client (Rechner↔Rechner ab Schritt 10; Tests) ----------

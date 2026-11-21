@@ -65,3 +65,34 @@ def chrome(win, title, content):
     win.add_controller(k)
     win.title_label = t
     return win
+
+
+def choice(parent, title, msg, buttons, on_pick, sub=None):
+    """Kleiner Suite-Dialog statt Gtk.AlertDialog. buttons = [(beschriftung, wert, gefährlich)], erster = Abbrechen
+    (auch Esc/✕). on_pick(wert) nur bei einem der anderen Knöpfe."""
+    win = Gtk.Window(title=i18n.tr(title), transient_for=parent, modal=True, resizable=False, default_width=440)
+    win.add_css_class("settings")
+    col = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=10, margin_start=16, margin_end=16,
+                  margin_top=6, margin_bottom=16)
+    if msg:
+        col.append(Gtk.Label(label=msg, xalign=0, wrap=True, max_width_chars=50))
+    if sub:
+        s = Gtk.Label(label=sub, xalign=0, wrap=True, max_width_chars=50)
+        s.add_css_class("wpdf-sub")
+        col.append(s)
+    row = Gtk.Box(spacing=8, halign=Gtk.Align.END, margin_top=6)
+    first = None
+    for i, (label, value, danger) in enumerate(buttons):
+        b = Gtk.Button(label=i18n.tr(label).lower(), focus_on_click=False)
+        b.add_css_class("pb"); b.add_css_class("small")
+        b.set_cursor_from_name("pointer")
+        if danger:
+            b.add_css_class("danger")
+        b.connect("clicked", lambda _b, i=i, v=value: (win.close(), i and on_pick(v)))
+        row.append(b)
+        first = first or b
+    col.append(row)
+    chrome(win, title, col)
+    win.present()
+    first.grab_focus()
+    return win

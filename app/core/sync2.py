@@ -112,7 +112,9 @@ class Replica:
         self.st = self._load()
         if me:
             self.st["me"] = me
-        self.st.setdefault("me", secrets.token_hex(6))
+        if "me" not in self.st:              # Kennung getrennt aufheben: geht der Zustand verloren, bleibt das Gerät dasselbe
+            self.st["me"] = self._read_me() or secrets.token_hex(6)
+        self._write_me()
         for k in ("e", "need", "shas", "peers", "ack"):
             self.st.setdefault(k, {})
         self.blob_dir = blob_dir or (os.path.join(os.path.dirname(path), "sync2-teile") if path else None)
@@ -126,13 +128,40 @@ class Replica:
 
     # ----- Zustand -----
     def _load(self):
+        """Zustand lesen; ist die Datei kaputt, die vorige Fassung (.bak) nehmen – nie still bei null anfangen
+        (dann gälte jeder Eintrag als gleichzeitig bearbeitet → Konflikt-Kopien von allem)."""
         if not self.path:
             return {}
+        for p in (self.path, self.path + ".bak"):
+            try:
+                with open(p, encoding="utf-8") as f:
+                    st = json.load(f)
+                if isinstance(st, dict):
+                    return st
+            except FileNotFoundError:
+                continue
+            except (OSError, ValueError):
+                try:
+                    shutil.copyfile(p, p + f".kaputt-{int(time.time())}")
+                except OSError:
+                    pass
+        return {}
+
+    def _read_me(self):
         try:
-            with open(self.path, encoding="utf-8") as f:
-                return json.load(f)
-        except (OSError, ValueError):
-            return {}
+            with open(self.path + ".me", encoding="utf-8") as f:
+                me = f.read().strip()
+            return me if 4 <= len(me) <= 64 else None
+        except (OSError, TypeError):
+            return None
+
+    def _write_me(self):
+        if self.path and self._read_me() != self.st["me"]:
+            try:
+                with open(self.path + ".me", "w", encoding="utf-8") as f:
+                    f.write(self.st["me"])
+            except OSError:
+                pass
 
     def save(self):
         if not self.path:
@@ -144,6 +173,8 @@ class Replica:
             f.write(raw)
             f.flush()
             os.fsync(f.fileno())
+        if os.path.exists(self.path):
+            os.replace(self.path, self.path + ".bak")
         os.replace(tmp, self.path)
 
     def _bump(self, vv):
@@ -202,7 +233,7 @@ class Replica:
                 d = digest(c, bm)
                 if e is None:
                     E[key] = {"vv": {self.me: 1}, "d": d, "s": s, "b": bm}
-                elif e["d"] != d:
+                elif e["d"] != d and e.get("r") != d:      # r = wie der Speicher den empfangenen Stand ablegt
                     E[key] = {"vv": self._bump(e["vv"]), "d": d, "s": s, "b": bm}
                 else:
                     e["s"] = s
@@ -353,9 +384,14 @@ class Replica:
         self.st["e"][key] = {"vv": vv, "d": None, "b": bm}
         got = self.b.get(key)
         real = digest(got, self._blobmap(key, got)) if got is not None else None
-        if d is not None and real != d:              # Speicher hat den Inhalt angepasst → das ist unser neuer Stand
-            vv = self._bump(vv)
-        self.st["e"][key] = {"vv": vv, "d": real, "s": _norm(self.b.stamp(key)), "b": bm}
+        e = {"vv": vv, "d": real, "s": _norm(self.b.stamp(key)), "b": bm}
+        if d is not None and real is not None and real != d:
+            # Speicher legt den Stand etwas anders ab (Normalisierung, DOCX-Rundweg): KEINE neue Version – sonst zählen
+            # beide Seiten jede Runde hoch und jede echte Änderung dazwischen wird zum Konflikt. Merken als Alias r.
+            e.update(d=d, r=real)
+        elif d is not None and real is None:
+            e["vv"] = self._bump(vv)
+        self.st["e"][key] = e
 
     def _note_peer(self, peer, theirs):
         """Quittungen für Grabsteine: die Gegenseite meldet ihn selbst (gleich oder neuer)."""

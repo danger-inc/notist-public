@@ -83,6 +83,7 @@ import store as st  # noqa: E402
 import glass  # noqa: E402
 import docfmt as df  # noqa: E402
 import pdfblock
+import dialogs  # noqa: E402
 import writer as wr  # noqa: E402
 import spell  # noqa: E402
 import latex as lx  # noqa: E402
@@ -792,6 +793,7 @@ class Notes(Gtk.Application):
         self.add_action(quit_act)
         for name, cb in (("remind", lambda a, v: self.fire_reminder(v.get_string()) if self.win else None),
                          ("open-note", lambda a, v: self.open_note(v.get_string())),
+                         ("open-folder", lambda a, v: self.open_folder(v.get_string())),
                          ("open-settings", lambda a, v: (self.do_activate(), self.open_settings(v.get_string() or None)))):
             act = Gio.SimpleAction.new(name, GLib.VariantType.new("s"))
             act.connect("activate", cb)
@@ -910,6 +912,8 @@ class Notes(Gtk.Application):
             self.activate_action("remind", GLib.Variant("s", arg("--remind")))
         elif "--note" in argv:
             self.activate_action("open-note", GLib.Variant("s", arg("--note")))
+        elif "--folder" in argv:
+            self.activate_action("open-folder", GLib.Variant("s", arg("--folder")))
         elif "--settings" in argv:
             self.activate_action("open-settings", GLib.Variant("s", arg("--settings")))
         elif "--daemon" in argv:
@@ -1100,9 +1104,9 @@ class Notes(Gtk.Application):
                                ("switcher", lambda *_: self.switcher.get_visible() and self.switcher.popup(),
                                 ["<Control>t"]),
                                ("mode-home", lambda *_: self.go_home(), ["<Alt>0"]),
-                               ("mode-notes", lambda *_: self.set_kind("notes"), ["<Alt>1"]),
-                               ("mode-docs", lambda *_: self.set_kind("docs"), ["<Alt>2"]),
-                               ("mode-latex", lambda *_: self.set_kind("latex"), ["<Alt>3"]),
+                               ("mode-notes", lambda *_: self.kind_key("notes"), ["<Alt>1"]),
+                               ("mode-docs", lambda *_: self.kind_key("docs"), ["<Alt>2"]),
+                               ("mode-latex", lambda *_: self.kind_key("latex"), ["<Alt>3"]),
                                ("latex-folder", lambda *_: self.open_latex_folder(), []),
                                ("latex-packages", lambda *_: self.latex.open_packages(), []),
                                ("settings", lambda *_: self.open_settings(), ["<Control>comma"]),
@@ -1170,14 +1174,18 @@ class Notes(Gtk.Application):
         self.brand.connect("clicked", lambda *_: self.recent.toggle())
         top.append(self.brand)
         self.home_btn = ch.tab(0, HOME_ICON, "home", "Home – alles auf einen Blick (Alt+0)")
-        self.home_btn.connect("toggled", lambda btn: btn.get_active() and self.go_home())
+        self.home_btn.connect("toggled", lambda btn: btn.get_active() and not self._tab_quiet and self.go_home())
         top.append(self.home_btn)
         self.kind_btns = {}
         group = self.home_btn
         for i, (kind, (_, icon, tip, _, _)) in enumerate(KINDS.items(), 1):
             b = ch.tab(i, icon, TAB_NAMES[kind], tip)
             b.set_group(group)
-            b.connect("toggled", lambda btn, k=kind: btn.get_active() and self.set_kind(k))
+            # Bereich wählen = wie ein Modus in Affinity: immer zur Liste aller Einträge dieses Bereichs (nicht direkt in
+            # die zuletzt offene Datei). Klick auf den schon offenen Bereich (Datei offen) → ebenfalls zur Liste.
+            b.connect("toggled", lambda btn, k=kind: btn.get_active() and not self._tab_quiet and self.kind_overview(k))
+            b.connect("clicked", lambda btn, k=kind: self.view == "kind" and self.kind == k and self.kind_overview(k))
+            b.set_tooltip_text(i18n.tr("{} – alle Einträge", tip))
             top.append(b)
             self.kind_btns[kind] = b
         self.tab_btns = [self.home_btn] + list(self.kind_btns.values())
@@ -1630,6 +1638,9 @@ class Notes(Gtk.Application):
         bar.append(self.color_btn)
         self.share_btn = self.make_share_button()
         bar.append(self.share_btn)
+        import collab_ui
+        self.collab = collab_ui.CollabUI(self)
+        self.new_btn.get_parent().insert_child_after(self.collab.btn, self.new_btn)   # oben, immer sichtbar
         self.more_btn = self.make_more_button()
         bar.append(self.more_btn)
         # Anheften/Löschen oben rechts in der Titelzeile des jeweiligen Bereichs (place_doc_actions)
@@ -2634,6 +2645,19 @@ class Notes(Gtk.Application):
             self.update_rem_btn()
         self.refresh_list()
 
+    def open_folder(self, spec):
+        """„docs:Geo“ / „notes:uni/Mathe“ (aus studist): Bereich als Liste zeigen, Ordner samt Eltern aufgeklappt."""
+        kind, _, folder = spec.partition(":")
+        kind = {"notizen": "notes", "words": "docs"}.get(kind, kind)          # auch die sichtbaren Namen
+        self.do_activate()
+        if kind not in self.stores:
+            return
+        self.kind_overview(kind)
+        opened = self.__dict__.setdefault("home_open_folders", set())
+        parts = folder.strip("/").split("/")
+        opened.update((kind, "/".join(parts[:i])) for i in range(1, len(parts) + 1))
+        self.refresh_home()
+
     def open_note(self, nid):
         self.do_activate()
         for kind, store in self.stores.items():
@@ -2957,6 +2981,7 @@ class Notes(Gtk.Application):
         if self.current:
             self.last_sel[self.kind] = self.current["id"]
         self.current = None
+        self.collab_hook("selected")
         self.kind = kind
         self.prefs["kind"] = kind
         self.save_prefs()
@@ -2966,7 +2991,11 @@ class Notes(Gtk.Application):
     def apply_kind(self):
         docs = self.docs
         if not self.kind_btns[self.kind].get_active():
-            self.kind_btns[self.kind].set_active(True)
+            self._tab_quiet = True
+            try:
+                self.kind_btns[self.kind].set_active(True)
+            finally:
+                self._tab_quiet = False
         self.kind_stack.set_visible_child_name(self.kind)
         self.place_doc_actions()
         self.app_title.set_label(KINDS[self.kind][0])
@@ -3035,6 +3064,7 @@ class Notes(Gtk.Application):
         return {"notes": "Neue Notiz", "docs": "Neues Dokument", "latex": "Neues LaTeX-Dokument"}[kind]
 
     zen = False
+    _tab_quiet = False          # Reiter programmatisch umschalten, ohne deren Handler auszulösen
 
     def set_zen(self, on):
         """Vollbild (F11): nur Dokument und Werkzeugleiste – Kopfleiste, Statuszeile, Liste, Titelzeile und
@@ -3051,6 +3081,8 @@ class Notes(Gtk.Application):
         if on:
             self.recent.close()
             self.hide_jump()
+        if not on:
+            self.latex.end_preview_full()
         (self.win.fullscreen if on else self.win.unfullscreen)()
         if on:
             self.notify("Vollbild – Esc oder F11 beendet es")
@@ -3193,8 +3225,35 @@ class Notes(Gtk.Application):
             return
         self.go_home()
 
+    def kind_key(self, kind):
+        """Alt+1/2/3: Bereich wählen → Liste aller Einträge dieses Bereichs."""
+        self.kind_overview(kind)
+
+    def kind_overview(self, kind):
+        """Liste aller Einträge eines Bereichs (Home, nur diese Spalte); oben ist der Bereich markiert, Strg+N legt
+        dort an. Eintrag anklicken öffnet ihn."""
+        if self.view == "home" and self.home_expanded == kind and self.kind_btns[kind].get_active():
+            return
+        self._tab_quiet = True
+        try:
+            self.go_home()
+            self.kind = kind
+            self.prefs["kind"] = kind
+            self.kind_btns[kind].set_active(True)
+        finally:
+            self._tab_quiet = False
+        self.home_expanded = kind
+        self.refresh_home()
+        self.update_tabs()
+        self.update_top_buttons()
+
     def toggle_home_expand(self, kind):
         self.home_expanded = None if self.home_expanded == kind else kind
+        self._tab_quiet = True                       # oben markieren, was zu sehen ist: Bereich oder Home
+        try:
+            (self.kind_btns[kind] if self.home_expanded else self.home_btn).set_active(True)
+        finally:
+            self._tab_quiet = False
         self.refresh_home()
 
     def go_home(self):
@@ -3210,6 +3269,7 @@ class Notes(Gtk.Application):
             if self.current:
                 self.last_sel[self.kind] = self.current["id"]
             self.current = None
+            self.collab_hook("selected")
             self.view = "home"
             self.home_btn.set_active(True)
             self.main_stack.set_visible_child_name("home")
@@ -3458,17 +3518,7 @@ class Notes(Gtk.Application):
         self.notify("Wiederhergestellt")
 
     def purge_entry(self, kind, n):
-        dlg = Gtk.AlertDialog(message=i18n.tr("„{}“ endgültig löschen?", self.display_title(n, kind)),
-                              detail=i18n.tr("Das lässt sich nicht rückgängig machen."),
-                              buttons=[i18n.tr("Abbrechen"), i18n.tr("Endgültig löschen")],
-                              cancel_button=0, default_button=0)
-
-        def done(d, res):
-            try:
-                if d.choose_finish(res) != 1:
-                    return
-            except GLib.Error:
-                return
+        def go(_v):
             was = n is self.current
             self.stores[kind].delete_forever(n)
             if was:
@@ -3478,32 +3528,28 @@ class Notes(Gtk.Application):
                     self.select(rest[0]["id"])
             self.refresh_home() if self.view == "home" else self.refresh_list()
             self.notify("Endgültig gelöscht")
-        dlg.choose(self.win, None, done)
+        dialogs.choice(self.win, "Endgültig löschen?",
+                       i18n.tr("„{}“ endgültig löschen?", self.display_title(n, kind)),
+                       [("Abbrechen", None, False), ("Endgültig löschen", True, True)], go,
+                       sub=i18n.tr("Das lässt sich nicht rückgängig machen."))
 
     def ask_delete(self, kind, n, then):
-        """Vor dem Löschen: Liegt die Datei außerhalb von notist (z. B. Downloads), erst nachfragen –
+        """Vor dem Löschen immer kurz nachfragen („Sicher?“). Liegt die Datei außerhalb von notist (z. B. Downloads):
         nur den Eintrag entfernen oder die Datei mit in den Papierkorb? then(mit_datei)."""
+        title = self.display_title(n, kind)
         path = lk.outside(self.prefs, n)
         if not path:
-            then(False)
+            dialogs.choice(self.win, "Löschen?", i18n.tr("„{}“ wirklich löschen?", title),
+                           [("Abbrechen", None, False), ("Löschen", False, True)], then,
+                           sub=i18n.tr("Der Eintrag kommt in den Papierkorb von notist und lässt sich von dort zurückholen."))
             return
         short = path.replace(os.path.expanduser("~"), "~", 1)
-        dlg = Gtk.AlertDialog(
-            message=i18n.tr("{} wirklich löschen?", os.path.basename(path)),
-            detail=i18n.tr("Diese Datei liegt nicht in notist, sondern hier:") + f"\n{short}\n\n" +
-            i18n.tr("„Nur aus notist entfernen“ lässt die Datei, wo sie ist. „Datei auch löschen“ legt sie in den "
-                    "Papierkorb des Systems – Rückgängig in notist holt sie zurück."),
-            buttons=[i18n.tr("Abbrechen"), i18n.tr("Nur aus notist entfernen"), i18n.tr("Datei auch löschen")],
-            cancel_button=0, default_button=1)
-
-        def done(d, res):
-            try:
-                i = d.choose_finish(res)
-            except GLib.Error:
-                return
-            if i in (1, 2):
-                then(i == 2)
-        dlg.choose(self.win, None, done)
+        dialogs.choice(self.win, "Löschen?", i18n.tr("{} wirklich löschen?", os.path.basename(path)),
+                       [("Abbrechen", None, False), ("Nur aus notist entfernen", False, False),
+                        ("Datei auch löschen", True, True)], then,
+                       sub=i18n.tr("Diese Datei liegt nicht in notist, sondern hier:") + f"\n{short}\n\n" +
+                       i18n.tr("„Nur aus notist entfernen“ lässt die Datei, wo sie ist. „Datei auch löschen“ legt sie in den "
+                               "Papierkorb des Systems – Rückgängig in notist holt sie zurück."))
 
     def trash_entry(self, kind, n, with_file=False):
         """Eintrag in notists Papierkorb (mit_datei: die Datei zusätzlich in den System-Papierkorb)."""
@@ -5467,6 +5513,7 @@ class Notes(Gtk.Application):
         if not from_list:
             self.refresh_list(keep=nid)
         self.apply_doc_lang()
+        self.collab_hook("selected")
         self.nav_note()
         if old is not n:
             self.offer_pos(n, auto)
@@ -5771,6 +5818,12 @@ class Notes(Gtk.Application):
             self.current["title"] = self.title.get_text()
             self.current["text"] = buf.get_slice(buf.get_start_iter(), buf.get_end_iter(), True)
         self.mark_dirty()
+        self.collab_hook("edited")
+
+    def collab_hook(self, what, *a):
+        c = getattr(self, "collab", None)
+        if c is not None:
+            getattr(c, what)(*a)
 
     def mark_dirty(self):
         if self._save_id:
@@ -6313,6 +6366,15 @@ if __name__ == "__main__":
             app.activate_action("open-note", GLib.Variant("s", nid))
             sys.exit(0)
         app.connect("activate", lambda a: GLib.idle_add(lambda: (a.open_note(nid), False)[1]))
+        sys.exit(app.run([sys.argv[0]]))
+    if "--folder" in sys.argv:               # aus studist: Kursordner zeigen („docs:Geo“)
+        spec = sys.argv[sys.argv.index("--folder") + 1]
+        app = Notes()
+        app.register(None)
+        if app.get_is_remote():
+            app.activate_action("open-folder", GLib.Variant("s", spec))
+            sys.exit(0)
+        app.connect("activate", lambda a: GLib.idle_add(lambda: (a.open_folder(spec), False)[1]))
         sys.exit(app.run([sys.argv[0]]))
     if "--quit" in sys.argv:                 # wirklich beenden (z. B. nach einem Update)
         app = Notes()

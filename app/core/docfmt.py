@@ -21,7 +21,7 @@ STYLE_FMT = {"normal": (11, False, False), "title": (26, True, False), "h1": (20
              "h2": (16, True, False), "h3": (13, True, False), "quote": (11, False, True), "code": (10, False, False)}
 BASE_FONT = "Noto Sans"
 MONO_FONT = "Noto Sans Mono"
-RUN_KEYS = ("b", "i", "u", "s", "va", "font", "size", "color", "hl", "link", "cm", "tc")   # cm: Kommentar-Id, tc: ins|del
+RUN_KEYS = ("b", "i", "u", "s", "va", "font", "size", "color", "hl", "link", "cm", "tc", "tcby")   # cm: Kommentar-Id, tc: ins|del, tcby: Autor
 
 
 # ---------------------------------------------------------------- Seite
@@ -485,7 +485,7 @@ class _DocxWriter:
                 if r["tc"] == "del":
                     txt = txt.replace("<w:t ", "<w:delText ").replace("</w:t>", "</w:delText>")
                 tag = r["tc"]
-                txt = f'<w:{tag} w:id="{900 + self.tc_n}" w:author="{esc(self.author)}" w:date="{stamp}">{txt}</w:{tag}>'
+                txt = f'<w:{tag} w:id="{900 + self.tc_n}" w:author="{esc(r.get("tcby") or self.author)}" w:date="{stamp}">{txt}</w:{tag}>'
             body.append(txt)
         close_cm()
         return f"<w:p><w:pPr>{''.join(ppr)}</w:pPr>{''.join(body)}</w:p>"
@@ -1085,6 +1085,8 @@ class _DocxReader:
                     props["cm"] = self._cm_active[-1]
                 if self._tc:
                     props["tc"] = self._tc
+                    if getattr(self, "_tcby", None):
+                        props["tcby"] = self._tcby
                 if link:
                     props["link"] = link
                     if props.get("color") == "#0563c1":   # Standard-Linkfarbe nicht als eigene Farbe merken
@@ -1126,8 +1128,9 @@ class _DocxReader:
                     self._cm_active.remove(cid)
             elif tag in ("ins", "del"):
                 old, self._tc = self._tc, tag
+                oldby, self._tcby = getattr(self, "_tcby", None), c.get(_q("author"))
                 self.runs_of(c, base, link, out)
-                self._tc = old
+                self._tc, self._tcby = old, oldby
             elif tag in ("smartTag", "fldSimple", "sdt", "sdtContent", "customXml", "moveTo"):
                 self.runs_of(c, base, link, out)
         return out

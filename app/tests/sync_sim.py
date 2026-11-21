@@ -214,7 +214,59 @@ def run(seed, steps=None):
         shutil.rmtree(root, ignore_errors=True)
 
 
+class NormBackend(MemBackend):
+    """Speichert Empfangenes leicht anders ab (wie der DOCX-Rundweg am PC oder ein anderes docfmt am Handy)."""
+    def __init__(self, files, tag):
+        super().__init__(files)
+        self.tag = tag
+
+    def put(self, key, content):
+        super().put(key, {**content, "norm": self.tag} if not key.startswith("prefs:") else content)
+
+
+def check_normalize():
+    """2026-11-18: Normalisierung zählte als eigene Änderung → Zähler in die Tausende, Konflikt-Kopien von Kopien.
+    Jetzt: ohne Bearbeitung bleibt alles ruhig; echte Änderungen kommen weiter an; kaputter Zustand → .bak, Kennung bleibt."""
+    root = tempfile.mkdtemp(prefix="notist-norm-")
+    try:
+        devs = []
+        for name in "ab":
+            os.makedirs(os.path.join(root, name))
+            be = NormBackend(os.path.join(root, name, "files"), name)
+            devs.append((be, sync2.Replica(be, path=os.path.join(root, name, "sync2.json"))))
+        (ba, ra), (bb, rb) = devs
+        for i in range(5):
+            ba.d[f"docs:{i}"] = {"id": str(i), "title": f"t{i}", "text": f"x{i}", "updated": "1"}
+            ba.ver[f"docs:{i}"] = 100 + i
+
+        def sync(src, dst):
+            src.scan(); dst.scan()
+            items, _ = src.outgoing(dst.summary())
+            dst.take(src.me, items, src.summary())
+        for _ in range(10):
+            sync(ra, rb); sync(rb, ra)
+        top = max(sum(e["vv"].values()) for r in (ra, rb) for e in r.st["e"].values())
+        assert top <= 2, f"zähler schaukeln hoch: {top}"
+        assert not any("konflikt" in str(c.get("title")) for be in (ba, bb) for c in be.d.values()), "konflikt-kopie"
+        bb.put("docs:1", {**bb.d["docs:1"], "text": "neu von b", "updated": "2"})      # echte Änderung an b
+        for _ in range(3):
+            sync(ra, rb); sync(rb, ra)
+        assert ba.d["docs:1"]["text"] == "neu von b", "echte änderung kam nicht an"
+        ra.save(); ra.save()
+        me = ra.me
+        with open(ra.path, "w") as f:
+            f.write("{kaputt")
+        r2 = sync2.Replica(ba, path=ra.path)
+        assert r2.me == me and r2.st["e"], "kaputter zustand: .bak nicht genommen"
+        os.remove(ra.path); os.remove(ra.path + ".bak")
+        assert sync2.Replica(ba, path=ra.path).me == me, "kennung verloren"
+    finally:
+        shutil.rmtree(root, ignore_errors=True)
+
+
 def main():
+    check_normalize()
+    print("✓ normalisierung/zustand")
     runs, seed = arg("--runs", 10000), arg("--seed", 1)
     t0 = time.time()
     bad = 0

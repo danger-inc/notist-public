@@ -8,7 +8,8 @@ import os, sys, tempfile, traceback, re
 T = tempfile.mkdtemp(prefix="notist-smoke-")
 os.environ.update(NOTES_HOME=T, NOTES_DATA_DIR=os.path.join(T, "data"), NOTES_APP_ID="de.test.NotistSmoke",
                   NOTES_NO_TIMERS="1", NOTIST_DATIST_HOME=os.path.join(T, "kalender"),
-                  XDG_CACHE_HOME=os.path.join(T, "cache"), XDG_CONFIG_HOME=os.path.join(T, "config"))
+                  XDG_CACHE_HOME=os.path.join(T, "cache"), XDG_CONFIG_HOME=os.path.join(T, "config"),
+                  NOTES_DOCS_DIR=os.path.join(T, "Dokumente"))
 APP = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, APP)
 VERBOSE = "-v" in sys.argv
